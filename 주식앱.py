@@ -1,7 +1,9 @@
 """
-주식 분석기 v2.1
-- 종목명/코드 검색 (KRX 전체 종목)
-- 관심종목 저장 (브라우저 기반, 새로고침 후에도 유지)
+주식 분석기 v2.2
+- 종목명/코드 검색
+- 관심종목 저장
+- 기관/외국인 수급 분석 + 신호 반영
+- 분기 실적 추이
 실행: streamlit run 주식앱.py
 """
 import streamlit as st
@@ -47,6 +49,10 @@ html, body, [class*="css"] {
 .zone-label { font-size: 12px; color: #888; margin-bottom: 4px; }
 .zone-value { font-size: 19px; font-weight: 800; }
 .zone-sub   { font-size: 12px; color: #999; margin-top: 2px; }
+.flow-card {
+    border-radius: 10px; padding: 12px;
+    text-align: center; margin-bottom: 4px;
+}
 @media (max-width: 640px) {
     .signal-label { font-size: 20px; }
     .signal-emoji { font-size: 36px; }
@@ -78,13 +84,12 @@ KNOWN_NAMES = {
     '145020': '휴젤',        '015760': '한국전력',
 }
 
-# ── KRX 전체 종목 로드 ────────────────────────────────────────────────────────
+# ── KRX 전체 종목 ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def load_krx_stocks():
     try:
         import FinanceDataReader as fdr
         df = fdr.StockListing('KRX')
-        # 컬럼명 정규화
         col_map = {}
         for c in df.columns:
             cl = c.lower().strip()
@@ -94,7 +99,7 @@ def load_krx_stocks():
                 col_map[c] = 'Name'
         df = df.rename(columns=col_map)
         if 'Code' not in df.columns or 'Name' not in df.columns:
-            raise ValueError("컬럼 없음")
+            raise ValueError
         df = df[['Code', 'Name']].copy()
         df['Code'] = df['Code'].astype(str).str.zfill(6)
         df = df[df['Code'].str.match(r'^\d{6}$')].drop_duplicates('Code').reset_index(drop=True)
@@ -141,7 +146,7 @@ def _save_watchlist():
     try:
         from streamlit_js_eval import streamlit_js_eval
         data = json.dumps(st.session_state.watchlist, ensure_ascii=False)
-        cnt = st.session_state.wl_save_cnt
+        cnt  = st.session_state.wl_save_cnt
         streamlit_js_eval(
             js_expressions=f"localStorage.setItem('kr_watchlist', {json.dumps(data)}); 1",
             key=f"wl_save_{cnt}"
@@ -151,18 +156,18 @@ def _save_watchlist():
         pass
 
 
-def add_to_watchlist(code: str, name: str):
+def add_to_watchlist(code, name):
     if not any(i['code'] == code for i in st.session_state.watchlist):
         st.session_state.watchlist.append({'code': code, 'name': name})
         _save_watchlist()
 
 
-def remove_from_watchlist(code: str):
+def remove_from_watchlist(code):
     st.session_state.watchlist = [i for i in st.session_state.watchlist if i['code'] != code]
     _save_watchlist()
 
 
-def in_watchlist(code: str) -> bool:
+def in_watchlist(code):
     return any(i['code'] == code for i in st.session_state.watchlist)
 
 
@@ -170,7 +175,6 @@ def in_watchlist(code: str) -> bool:
 def render_sidebar():
     with st.sidebar:
         st.markdown("## ⭐ 관심종목")
-
         wl = st.session_state.get('watchlist', [])
         if not wl:
             st.caption("아직 추가된 종목이 없어요.\n분석 후 ⭐ 버튼으로 추가하세요.")
@@ -178,11 +182,8 @@ def render_sidebar():
             for item in wl:
                 c1, c2 = st.columns([5, 1])
                 with c1:
-                    if st.button(
-                        f"📊 {item['name']}",
-                        key=f"wl_btn_{item['code']}",
-                        use_container_width=True,
-                    ):
+                    if st.button(f"📊 {item['name']}", key=f"wl_btn_{item['code']}",
+                                 use_container_width=True):
                         st.session_state['auto_code'] = item['code']
                         st.session_state['auto_name'] = item['name']
                         st.rerun()
@@ -190,12 +191,11 @@ def render_sidebar():
                     if st.button("✕", key=f"wl_del_{item['code']}"):
                         remove_from_watchlist(item['code'])
                         st.rerun()
-
         st.divider()
         st.caption("💡 사이드바가 안 보이면\n화면 왼쪽 **>** 버튼을 누르세요")
 
 
-# ── 데이터 수집 ───────────────────────────────────────────────────────────────
+# ── 주가 데이터 ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=900)
 def get_stock_data(code: str, months: int):
     from datetime import datetime, timedelta
@@ -219,7 +219,7 @@ def get_stock_data(code: str, months: int):
 
     for suffix in ['.KS', '.KQ']:
         try:
-            df = __import__('yfinance').Ticker(f'{code}{suffix}').history(start=s, end=e)
+            df = yf.Ticker(f'{code}{suffix}').history(start=s, end=e)
             if not df.empty and len(df) > 10:
                 df.index = pd.to_datetime(df.index).tz_localize(None)
                 return df[['Open', 'High', 'Low', 'Close', 'Volume']]
@@ -230,9 +230,10 @@ def get_stock_data(code: str, months: int):
 
 @st.cache_data(ttl=900)
 def get_stock_info(code: str):
+    import yfinance as yf
     for suffix in ['.KS', '.KQ']:
         try:
-            raw = __import__('yfinance').Ticker(f'{code}{suffix}').info
+            raw = yf.Ticker(f'{code}{suffix}').info
             if raw and raw.get('regularMarketPrice'):
                 return {
                     'per':        raw.get('trailingPE'),
@@ -247,6 +248,43 @@ def get_stock_info(code: str):
         except Exception:
             pass
     return {}
+
+
+# ── 기관/외국인 수급 ──────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def get_investor_flow(code: str, days: int = 20):
+    """pykrx로 기관/외국인 순매수 데이터 수집"""
+    from datetime import datetime, timedelta
+    try:
+        from pykrx import stock as pstock
+        end   = datetime.today()
+        start = end - timedelta(days=days * 2 + 10)  # 주말 여유분
+        df = pstock.get_market_trading_value_by_date(
+            start.strftime('%Y%m%d'),
+            end.strftime('%Y%m%d'),
+            code,
+        )
+        if df is None or df.empty:
+            return None
+        return df.tail(days)
+    except Exception:
+        return None
+
+
+# ── 분기 실적 ─────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=86400)
+def get_quarterly_earnings(code: str):
+    """yfinance로 분기 매출/영업이익 수집"""
+    import yfinance as yf
+    for suffix in ['.KS', '.KQ']:
+        try:
+            t   = yf.Ticker(f'{code}{suffix}')
+            fin = t.quarterly_financials
+            if fin is not None and not fin.empty and len(fin.columns) >= 2:
+                return fin
+        except Exception:
+            pass
+    return None
 
 
 # ── 기술지표 ─────────────────────────────────────────────────────────────────
@@ -308,10 +346,8 @@ def calc_zones(df: pd.DataFrame, info: dict) -> dict:
     stop = round(buy_mid * 0.93 / 100) * 100
     tgt1 = round(bb_upper / 100) * 100
     tgt2 = round(w52_high * 0.97 / 100) * 100
-
     risk = buy_mid - stop
     rr   = round((tgt1 - buy_mid) / risk, 1) if risk > 0 else 0
-
     pos_pct = (last - w52_low) / (w52_high - w52_low) * 100 if w52_high != w52_low else 50
     day_chg = (last / df['Close'].iloc[-2] - 1) * 100 if len(df) > 1 else 0.0
 
@@ -328,8 +364,8 @@ def calc_zones(df: pd.DataFrame, info: dict) -> dict:
     }
 
 
-# ── 종합 신호 점수 ────────────────────────────────────────────────────────────
-def calc_signal(df: pd.DataFrame, z: dict) -> dict:
+# ── 종합 신호 점수 (수급 포함) ────────────────────────────────────────────────
+def calc_signal(df: pd.DataFrame, z: dict, flow_df=None) -> dict:
     score   = 50
     reasons = []
 
@@ -347,6 +383,7 @@ def calc_signal(df: pd.DataFrame, z: dict) -> dict:
     macd_hp = df['MACD_hist'].iloc[-2] if len(df) > 1 else macd_h
     ma5, ma20, ma60 = df['MA5'].iloc[-1], df['MA20'].iloc[-1], df['MA60'].iloc[-1]
 
+    # RSI
     if rsi is not None:
         if rsi < 30:
             score += 22; reasons.append(('pos', f'RSI {rsi:.0f} — 과매도 구간, 반등 가능성 높음'))
@@ -357,6 +394,7 @@ def calc_signal(df: pd.DataFrame, z: dict) -> dict:
         elif rsi > 62:
             score -= 10; reasons.append(('neu', f'RSI {rsi:.0f} — 다소 높은 편'))
 
+    # 볼린저밴드
     if bb_pct < 0.10:
         score += 20; reasons.append(('pos', '볼린저밴드 하단 근처 — 기술적 저점'))
     elif bb_pct < 0.35:
@@ -366,6 +404,7 @@ def calc_signal(df: pd.DataFrame, z: dict) -> dict:
     elif bb_pct > 0.70:
         score -= 8
 
+    # MACD
     if macd_v > macd_s and macd_h > macd_hp and macd_h > 0:
         score += 15; reasons.append(('pos', 'MACD 상승 전환 — 매수 신호'))
     elif macd_v > macd_s and macd_h > macd_hp:
@@ -373,11 +412,13 @@ def calc_signal(df: pd.DataFrame, z: dict) -> dict:
     elif macd_v < macd_s and macd_h < macd_hp and macd_h < 0:
         score -= 15; reasons.append(('neg', 'MACD 하락 전환 — 매도 압력'))
 
+    # 이동평균 배열
     if ma5 > ma20 > ma60:
         score += 10; reasons.append(('pos', '이동평균 정배열 — 상승 추세 유지'))
     elif ma5 < ma20 < ma60:
         score -= 10; reasons.append(('neg', '이동평균 역배열 — 하락 추세'))
 
+    # 52주 위치
     if pos < 25:
         score += 15; reasons.append(('pos', f'52주 저점 근처 ({pos:.0f}%) — 역사적 저점 구간'))
     elif pos < 40:
@@ -386,6 +427,27 @@ def calc_signal(df: pd.DataFrame, z: dict) -> dict:
         score -= 15; reasons.append(('neg', f'52주 고점 근처 ({pos:.0f}%) — 신중한 접근 필요'))
     elif pos > 70:
         score -= 5;  reasons.append(('neu', f'52주 상단 ({pos:.0f}%) — 다소 높은 위치'))
+
+    # ── 수급 반영 (pykrx) ─────────────────────────────────────────────────────
+    if flow_df is not None and not flow_df.empty:
+        foreign_col = next((c for c in flow_df.columns if '외국인' in c), None)
+        inst_col    = next((c for c in flow_df.columns if '기관' in c and '합계' in c), None)
+
+        recent5 = flow_df.tail(5)
+
+        if foreign_col:
+            f5 = recent5[foreign_col].sum()
+            if f5 > 5e9:   # 50억 이상 순매수
+                score += 12; reasons.append(('pos', f'외국인 최근 5일 순매수 +{f5/1e8:.0f}억 — 외국인 유입'))
+            elif f5 < -5e9:
+                score -= 12; reasons.append(('neg', f'외국인 최근 5일 순매도 -{abs(f5)/1e8:.0f}억 — 외국인 이탈'))
+
+        if inst_col:
+            i5 = recent5[inst_col].sum()
+            if i5 > 5e9:
+                score += 8;  reasons.append(('pos', f'기관 최근 5일 순매수 +{i5/1e8:.0f}억 — 기관 유입'))
+            elif i5 < -5e9:
+                score -= 8;  reasons.append(('neg', f'기관 최근 5일 순매도 -{abs(i5)/1e8:.0f}억 — 기관 이탈'))
 
     score = max(5, min(95, score))
 
@@ -418,7 +480,7 @@ def price_position(last, z):
     return ('🏆', '단기 목표가 도달 구간 — 보유 중이라면 분할 익절 고려', '#FFF9E6', '#B8860B')
 
 
-def find_sr(df: pd.DataFrame, n: int = 5):
+def find_sr(df, n=5):
     recent = df.tail(60)
     highs, lows = recent['High'].values, recent['Low'].values
     sup, res = [], []
@@ -447,7 +509,7 @@ def find_sr(df: pd.DataFrame, n: int = 5):
 
 
 # ── 차트 ─────────────────────────────────────────────────────────────────────
-def build_chart(df: pd.DataFrame, z: dict):
+def build_chart(df, z):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -536,26 +598,167 @@ def build_chart(df: pd.DataFrame, z: dict):
     return fig
 
 
-# ── 분석 결과 렌더링 ──────────────────────────────────────────────────────────
+# ── 수급 차트 ─────────────────────────────────────────────────────────────────
+def render_investor_flow(flow_df):
+    import plotly.graph_objects as go
+
+    if flow_df is None or flow_df.empty:
+        st.caption("수급 데이터를 가져올 수 없습니다.")
+        return
+
+    foreign_col = next((c for c in flow_df.columns if '외국인' in c), None)
+    inst_col    = next((c for c in flow_df.columns if '기관' in c and '합계' in c), None)
+    indiv_col   = next((c for c in flow_df.columns if '개인' in c), None)
+
+    if not foreign_col and not inst_col:
+        st.caption("수급 데이터 컬럼을 찾을 수 없습니다.")
+        return
+
+    # 요약 카드
+    recent5 = flow_df.tail(5)
+    cards = []
+    if foreign_col:
+        val = recent5[foreign_col].sum()
+        cards.append(('외국인', val))
+    if inst_col:
+        val = recent5[inst_col].sum()
+        cards.append(('기관', val))
+    if indiv_col:
+        val = recent5[indiv_col].sum()
+        cards.append(('개인', val))
+
+    cols = st.columns(len(cards))
+    for i, (name, val) in enumerate(cards):
+        color  = '#1D9E75' if val >= 0 else '#E24B4A'
+        trend  = '▲ 순매수' if val >= 0 else '▼ 순매도'
+        amount = f"+{val/1e8:.0f}억" if val >= 0 else f"-{abs(val)/1e8:.0f}억"
+        with cols[i]:
+            st.markdown(
+                f"<div class='flow-card' style='background:#F8F8F8;border-top:3px solid {color}'>"
+                f"<div style='font-size:12px;color:#888'>{name} (5일)</div>"
+                f"<div style='font-size:17px;font-weight:800;color:{color}'>{trend}</div>"
+                f"<div style='font-size:13px;color:{color}'>{amount}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # 일별 순매수 막대차트
+    fig = go.Figure()
+    if foreign_col:
+        bar_colors = ['#1D9E75' if v >= 0 else '#E24B4A' for v in flow_df[foreign_col]]
+        fig.add_trace(go.Bar(
+            x=flow_df.index, y=flow_df[foreign_col] / 1e8,
+            name='외국인', marker_color=bar_colors, opacity=0.85,
+        ))
+    if inst_col:
+        inst_colors = ['#534AB7' if v >= 0 else '#A090D0' for v in flow_df[inst_col]]
+        fig.add_trace(go.Bar(
+            x=flow_df.index, y=flow_df[inst_col] / 1e8,
+            name='기관', marker_color=inst_colors, opacity=0.6,
+        ))
+
+    fig.add_hline(y=0, line_color='#888', line_width=1)
+    fig.update_layout(
+        height=240, barmode='group',
+        plot_bgcolor='#FAFAF9', paper_bgcolor='white',
+        margin=dict(l=50, r=20, t=16, b=24),
+        yaxis_title='순매수 (억원)',
+        legend=dict(orientation='h', y=1.1, x=1, xanchor='right'),
+        font=dict(size=11),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='#EEE')
+    fig.update_yaxes(showgrid=True, gridcolor='#EEE')
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("※ KRX 기준 / 양수=순매수(사는 중) / 음수=순매도(파는 중)")
+
+
+# ── 분기 실적 차트 ────────────────────────────────────────────────────────────
+def render_quarterly_earnings(earnings):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    if earnings is None or earnings.empty:
+        st.caption("실적 데이터를 가져올 수 없습니다.")
+        return
+
+    # 매출/영업이익 행 찾기
+    rev_keys = ['Total Revenue', 'Revenue', 'TotalRevenue']
+    op_keys  = ['Operating Income', 'EBIT', 'OperatingIncome']
+    net_keys = ['Net Income', 'NetIncome']
+
+    rev_data = next((earnings.loc[k] for k in rev_keys if k in earnings.index), None)
+    op_data  = next((earnings.loc[k] for k in op_keys  if k in earnings.index), None)
+    net_data = next((earnings.loc[k] for k in net_keys if k in earnings.index), None)
+
+    if rev_data is None and op_data is None:
+        st.caption("실적 데이터 형식을 확인할 수 없습니다.")
+        return
+
+    # 최근 4분기 (열 = 날짜, 오래된 순 정렬)
+    cols  = sorted(earnings.columns)[-4:]
+    dates = [str(c)[:7] for c in cols]
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('매출 / 영업이익 (억원)', '순이익 (억원)'),
+    )
+
+    if rev_data is not None:
+        vals = [rev_data[c] / 1e8 if pd.notna(rev_data[c]) else 0 for c in cols]
+        fig.add_trace(go.Bar(
+            x=dates, y=vals, name='매출',
+            marker_color='#534AB7', opacity=0.5,
+        ), row=1, col=1)
+
+    if op_data is not None:
+        vals   = [op_data[c] / 1e8 if pd.notna(op_data[c]) else 0 for c in cols]
+        colors = ['#1D9E75' if v >= 0 else '#E24B4A' for v in vals]
+        fig.add_trace(go.Bar(
+            x=dates, y=vals, name='영업이익',
+            marker_color=colors, opacity=0.85,
+        ), row=1, col=1)
+
+    if net_data is not None:
+        vals   = [net_data[c] / 1e8 if pd.notna(net_data[c]) else 0 for c in cols]
+        colors = ['#1D9E75' if v >= 0 else '#E24B4A' for v in vals]
+        fig.add_trace(go.Bar(
+            x=dates, y=vals, name='순이익',
+            marker_color=colors, opacity=0.85,
+        ), row=1, col=2)
+
+    fig.update_layout(
+        height=280,
+        plot_bgcolor='#FAFAF9', paper_bgcolor='white',
+        margin=dict(l=40, r=20, t=36, b=24),
+        legend=dict(orientation='h', y=1.15, x=0.5, xanchor='center'),
+        showlegend=True, font=dict(size=11),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='#EEE')
+    fig.update_yaxes(showgrid=True, gridcolor='#EEE', tickformat=',')
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("※ Yahoo Finance 기준 · 단위: 억원 · 음수=적자")
+
+
+# ── 분석 결과 ─────────────────────────────────────────────────────────────────
 def render_analysis(code: str, name: str, months: int):
-    with st.spinner(f'{name} 데이터 불러오는 중...'):
-        df_raw = get_stock_data(code, months)
+    with st.spinner(f'{name} 데이터 수집 중...'):
+        df_raw   = get_stock_data(code, months)
+        info     = get_stock_info(code)
+        flow_df  = get_investor_flow(code)
+        earnings = get_quarterly_earnings(code)
 
     if df_raw is None or df_raw.empty:
         st.error("데이터를 가져올 수 없습니다. 종목코드를 다시 확인해주세요.")
         return
 
-    with st.spinner("지표 계산 중..."):
-        info = get_stock_info(code)
-        df   = calc_indicators(df_raw)
-        z    = calc_zones(df, info)
-        sig  = calc_signal(df, z)
-        sup, res = find_sr(df)
+    df  = calc_indicators(df_raw)
+    z   = calc_zones(df, info)
+    sig = calc_signal(df, z, flow_df)   # 수급 포함
+    sup, res = find_sr(df)
 
     # 종목 헤더 + 관심종목 버튼
     chg_col = '#E24B4A' if z['day_chg'] >= 0 else '#185FA5'
     arrow   = '▲' if z['day_chg'] >= 0 else '▼'
-
     h_col, btn_col = st.columns([5, 1])
     with h_col:
         st.markdown(
@@ -565,16 +768,13 @@ def render_analysis(code: str, name: str, months: int):
             unsafe_allow_html=True,
         )
     with btn_col:
-        st.write("")
-        st.write("")
+        st.write(""); st.write("")
         if in_watchlist(code):
             if st.button("⭐ 저장됨", use_container_width=True):
-                remove_from_watchlist(code)
-                st.rerun()
+                remove_from_watchlist(code); st.rerun()
         else:
             if st.button("☆ 관심종목", use_container_width=True):
-                add_to_watchlist(code, name)
-                st.rerun()
+                add_to_watchlist(code, name); st.rerun()
 
     # 신호 박스
     s = sig
@@ -582,12 +782,12 @@ def render_analysis(code: str, name: str, months: int):
         f"<div class='signal-box' style='background:{s['bg']};border:2px solid {s['color']}55'>"
         f"<div class='signal-emoji'>{s['emoji']}</div>"
         f"<div class='signal-label' style='color:{s['color']}'>{s['label']}</div>"
-        f"<div class='signal-score' style='color:{s['color']}'>종합 점수 {s['score']}/100</div>"
+        f"<div class='signal-score' style='color:{s['color']}'>종합 점수 {s['score']}/100 (기술지표 + 수급)</div>"
         f"<div class='signal-desc'>{s['desc']}</div>"
         f"</div>", unsafe_allow_html=True,
     )
 
-    # 현재가 위치 메시지
+    # 현재가 위치
     icon, msg, bg, col = price_position(z['last'], z)
     st.markdown(
         f"<div class='price-bar' style='background:{bg};color:{col};border-left:4px solid {col}'>"
@@ -636,7 +836,6 @@ def render_analysis(code: str, name: str, months: int):
             f"</div>", unsafe_allow_html=True,
         )
 
-    # 리스크/리워드
     rr = z['rr']
     rr_col = '#1D9E75' if rr >= 2 else '#D4870E' if rr >= 1 else '#E24B4A'
     rr_txt = '유리한 비율 👍' if rr >= 2 else '보통' if rr >= 1 else '불리한 비율'
@@ -661,6 +860,10 @@ def render_analysis(code: str, name: str, months: int):
                 unsafe_allow_html=True,
             )
 
+    # ── 기관/외국인 수급 ──────────────────────────────────────────────────────
+    st.markdown("#### 💰 기관/외국인 수급 현황 (최근 20일)")
+    render_investor_flow(flow_df)
+
     # 52주 위치
     st.markdown("#### 📉 52주 가격 위치")
     lc, rc = st.columns(2)
@@ -678,15 +881,15 @@ def render_analysis(code: str, name: str, months: int):
                 st.markdown("**지지선** (반등 가능 구간)")
                 for v in sup:
                     d = round((z['last'] - v) / z['last'] * 100, 1)
-                    st.markdown(f"- `{int(v):,}원` (현재가 대비 {d:+.1f}%)")
+                    st.markdown(f"- `{int(v):,}원` ({d:+.1f}%)")
         with rc2:
             if res:
                 st.markdown("**저항선** (매도 압력 구간)")
                 for v in res:
                     d = round((v - z['last']) / z['last'] * 100, 1)
-                    st.markdown(f"- `{int(v):,}원` (현재가 대비 +{d:.1f}%)")
+                    st.markdown(f"- `{int(v):,}원` (+{d:.1f}%)")
 
-    # 차트
+    # 주가 차트
     st.markdown("#### 📈 주가 차트")
     fig = build_chart(df, z)
     st.plotly_chart(fig, use_container_width=True)
@@ -711,6 +914,10 @@ def render_analysis(code: str, name: str, months: int):
             st.metric("이동평균 배열", trend)
             st.metric("MA20 / MA60", f"{int(ma20_v):,} / {int(ma60_v):,}원")
 
+    # ── 분기 실적 추이 ────────────────────────────────────────────────────────
+    with st.expander("📊 분기 실적 추이 (최근 4분기)"):
+        render_quarterly_earnings(earnings)
+
     # 기업 정보
     if any([info.get('per'), info.get('pbr'), info.get('market_cap')]):
         with st.expander("🏢 기업 기본 정보"):
@@ -720,12 +927,12 @@ def render_analysis(code: str, name: str, months: int):
                 if cap:
                     st.metric("시가총액", f"{cap/1e12:.1f}조원" if cap >= 1e12 else f"{cap/1e8:.0f}억원")
                 if info.get('per'):
-                    st.metric("PER", f"{info['per']:.1f}배")
+                    st.metric("PER", f"{info['per']:.1f}배", help="낮을수록 저평가")
             with ic2:
                 if info.get('pbr'):
-                    st.metric("PBR", f"{info['pbr']:.2f}배")
+                    st.metric("PBR", f"{info['pbr']:.2f}배", help="1 이하면 자산 대비 저평가")
                 if info.get('roe'):
-                    st.metric("ROE", f"{info['roe']*100:.1f}%")
+                    st.metric("ROE", f"{info['roe']*100:.1f}%", help="높을수록 효율적")
             if info.get('sector') and info['sector'] != '-':
                 st.caption(f"섹터: {info['sector']}")
             if info.get('dividend'):
@@ -740,30 +947,21 @@ def render_analysis(code: str, name: str, months: int):
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
-    # 관심종목 초기화 (localStorage 로드)
     init_watchlist()
-
-    # 사이드바
     render_sidebar()
 
-    # 헤더
     st.markdown("## 📈 한국 주식 분석기")
-    st.caption("실시간 데이터 기반 · 매수/손절 구간 자동 계산 · 투자 판단은 본인 책임")
+    st.caption("실시간 데이터 기반 · 기술지표 + 수급 분석 · 투자 판단은 본인 책임")
     st.divider()
 
-    # KRX 전체 종목 로드
     krx = load_krx_stocks()
 
-    # ── 검색 UI ──────────────────────────────────────────────────
-    # 관심종목 클릭으로 자동 선택된 경우
     auto_code = st.session_state.pop('auto_code', None)
     auto_name = st.session_state.pop('auto_name', None)
 
-    default_query = auto_code or ''
-
     query = st.text_input(
         "🔍 종목명 또는 코드 검색",
-        value=default_query,
+        value=auto_code or '',
         placeholder="예: 삼성전자 / 005930 / SK하이닉스",
         key="search_input",
     )
@@ -772,13 +970,11 @@ def main():
 
     if query.strip():
         q = query.strip()
-        # 6자리 코드 직접 입력
         if q.isdigit() and len(q) == 6:
             selected_code = q
             row = krx[krx['Code'] == q]
             selected_name = row['Name'].values[0] if not row.empty else KNOWN_NAMES.get(q, f'종목 {q}')
         else:
-            # 종목명 검색
             matches = search_stocks(krx, q)
             if not matches.empty:
                 options = {
@@ -788,32 +984,25 @@ def main():
                 sel = st.selectbox("종목 선택", list(options.keys()), key="stock_select")
                 selected_code, selected_name = options[sel]
             else:
-                st.warning("검색 결과가 없습니다. 종목명이나 6자리 코드를 확인해주세요.")
+                st.warning("검색 결과가 없습니다.")
 
-    # 관심종목에서 자동 선택된 경우 override
     if auto_code and not selected_code:
         selected_code = auto_code
         selected_name = auto_name
 
-    # ── 기간 선택 + 분석 버튼 ────────────────────────────────────
     if selected_code:
         col_p, col_b = st.columns([2, 1])
         with col_p:
-            period_sel = st.selectbox(
-                "조회 기간",
-                ["3개월", "6개월", "1년", "2년"],
-                index=2,
-                key="period_sel",
-            )
+            period_sel = st.selectbox("조회 기간", ["3개월", "6개월", "1년", "2년"],
+                                      index=2, key="period_sel")
         with col_b:
             st.write("")
             analyze = st.button("📊 분석하기", use_container_width=True, type="primary")
 
         if analyze or auto_code:
             period_map = {"3개월": 3, "6개월": 6, "1년": 12, "2년": 24}
-            months = period_map[period_sel]
             st.divider()
-            render_analysis(selected_code, selected_name, months)
+            render_analysis(selected_code, selected_name, period_map[period_sel])
     else:
         if not query.strip():
             st.info(
