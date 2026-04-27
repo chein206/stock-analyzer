@@ -1098,77 +1098,245 @@ def render_analysis(code, name, months):
     st.caption("⚠️ **투자 주의사항** — 본 분석은 기술적 지표 기반 참고 정보이며 투자 권유가 아닙니다. 모든 투자 판단과 책임은 투자자 본인에게 있습니다.")
 
 
+# ── 포트폴리오 ───────────────────────────────────────────────────────────────
+def init_portfolio():
+    """쿠키에서 포트폴리오 보유 데이터 로드"""
+    if 'portfolio'        not in st.session_state: st.session_state.portfolio        = {}
+    if 'portfolio_loaded' not in st.session_state: st.session_state.portfolio_loaded = False
+
+    if not st.session_state.portfolio_loaded:
+        if _ctrl is not None:
+            try:
+                raw = _ctrl.get('kr_portfolio')
+                if raw:
+                    loaded = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(loaded, dict):
+                        st.session_state.portfolio = loaded
+            except Exception:
+                pass
+        st.session_state.portfolio_loaded = True
+
+
+def save_portfolio():
+    """포트폴리오 보유 데이터 쿠키 저장 (1년)"""
+    if _ctrl is not None:
+        try:
+            _ctrl.set('kr_portfolio',
+                      json.dumps(st.session_state.portfolio, ensure_ascii=False),
+                      max_age=60 * 60 * 24 * 365)
+        except Exception:
+            pass
+
+
+def render_portfolio_tab():
+    wl = st.session_state.get('watchlist', [])
+    if not wl:
+        st.info("관심종목이 없어요.\n종목 분석 후 ⭐ 버튼으로 추가하면 여기서 수익률을 확인할 수 있어요.")
+        return
+
+    holdings = st.session_state.portfolio   # dict: {code: {avg_price, qty}}
+
+    # ── 1단계: 현재가 + 보유 데이터 수집 (요약용) ────────────────────────────
+    rows = []
+    for item in wl:
+        code, name = item['code'], item['name']
+        pinfo = get_quick_price(code)
+        h     = holdings.get(code, {})
+        avg_p = h.get('avg_price', 0)
+        qty   = h.get('qty', 0)
+        cur_p = pinfo['price']   if pinfo else None
+        chg   = pinfo['chg_pct'] if pinfo else None
+        rows.append(dict(code=code, name=name, cur_p=cur_p, chg=chg,
+                         avg_p=avg_p, qty=qty))
+
+    # ── 2단계: 요약 카드 (보유 데이터 있는 종목만) ───────────────────────────
+    invested_total = sum(r['avg_p'] * r['qty']
+                         for r in rows if r['avg_p'] > 0 and r['qty'] > 0)
+    current_total  = sum(r['cur_p'] * r['qty']
+                         for r in rows
+                         if r['avg_p'] > 0 and r['qty'] > 0 and r['cur_p'])
+
+    if invested_total > 0:
+        pnl_total     = current_total - invested_total
+        pnl_pct_total = pnl_total / invested_total * 100
+        p_col = '#C0392B' if pnl_total >= 0 else '#1A5FAC'
+        st.markdown(
+            f"<div style='background:#F8F8F8;border-radius:14px;padding:16px 20px;"
+            f"margin-bottom:18px;display:flex;gap:32px;flex-wrap:wrap'>"
+            f"<div><div style='font-size:12px;color:#888'>💰 총 투자금액</div>"
+            f"<div style='font-size:20px;font-weight:800'>{int(invested_total):,}원</div></div>"
+            f"<div><div style='font-size:12px;color:#888'>📈 총 평가금액</div>"
+            f"<div style='font-size:20px;font-weight:800'>{int(current_total):,}원</div></div>"
+            f"<div><div style='font-size:12px;color:#888'>💵 총 손익</div>"
+            f"<div style='font-size:20px;font-weight:800;color:{p_col}'>"
+            f"{'+'if pnl_total>=0 else ''}{int(pnl_total):,}원 "
+            f"({pnl_pct_total:+.2f}%)</div></div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── 3단계: 종목별 카드 ───────────────────────────────────────────────────
+    for r in rows:
+        code, name = r['code'], r['name']
+        cur_p, chg = r['cur_p'], r['chg']
+        h = holdings.get(code, {})
+
+        with st.container():
+            # 종목명 + 현재가 행
+            hc1, hc2, hc3 = st.columns([4, 4, 1])
+            with hc1:
+                st.markdown(f"**{name}** `{code}`")
+            with hc2:
+                if cur_p and chg is not None:
+                    up    = chg >= 0
+                    arrow = '▲' if up else '▼'
+                    c     = '#C0392B' if up else '#1A5FAC'
+                    st.markdown(
+                        f"<span style='color:{c};font-weight:700'>"
+                        f"{int(cur_p):,}원 {arrow}{abs(chg):.2f}%</span>",
+                        unsafe_allow_html=True)
+                else:
+                    st.caption("가격 조회 중...")
+            with hc3:
+                if st.button("📊", key=f"pt_go_{code}", help="종목 분석 탭에서 분석"):
+                    st.session_state['auto_code'] = code
+                    st.session_state['auto_name'] = name
+                    st.session_state['go_analysis'] = True
+                    st.rerun()
+
+            # 평균단가 · 수량 입력 + 수익률
+            ic1, ic2, ic3, ic4 = st.columns([2, 2, 3, 1])
+            with ic1:
+                avg_input = st.number_input(
+                    "평균단가 (원)", min_value=0, step=100, format="%d",
+                    value=h.get('avg_price', 0),
+                    key=f"pt_avg_{code}")
+            with ic2:
+                qty_input = st.number_input(
+                    "수량 (주)", min_value=0, step=1, format="%d",
+                    value=h.get('qty', 0),
+                    key=f"pt_qty_{code}")
+            with ic3:
+                if avg_input > 0 and qty_input > 0 and cur_p:
+                    invested  = avg_input * qty_input
+                    cur_val   = cur_p    * qty_input
+                    pnl       = cur_val - invested
+                    pnl_pct   = pnl / invested * 100
+                    pc        = '#C0392B' if pnl >= 0 else '#1A5FAC'
+                    arr       = '▲' if pnl >= 0 else '▼'
+                    st.markdown(
+                        f"<div style='padding-top:24px'>"
+                        f"<span style='color:{pc};font-weight:700;font-size:15px'>"
+                        f"{arr} {abs(pnl_pct):.2f}%&nbsp;&nbsp;"
+                        f"({'+'if pnl>=0 else ''}{int(pnl):,}원)</span><br>"
+                        f"<span style='color:#999;font-size:12px'>"
+                        f"매수 {int(invested):,}원 → 평가 {int(cur_val):,}원</span>"
+                        f"</div>",
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        "<div style='padding-top:28px;color:#bbb;font-size:13px'>"
+                        "단가·수량 입력 시 수익률 표시</div>",
+                        unsafe_allow_html=True)
+            with ic4:
+                st.markdown("<div style='padding-top:22px'>", unsafe_allow_html=True)
+                if st.button("💾", key=f"pt_save_{code}", help="저장"):
+                    st.session_state.portfolio[code] = {
+                        'avg_price': int(avg_input),
+                        'qty':       int(qty_input),
+                    }
+                    save_portfolio()
+                    st.toast(f"✅ {name} 저장 완료!")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.divider()
+
+    st.caption("💡 💾 버튼으로 저장하면 다음에 앱을 열어도 단가·수량이 유지돼요")
+
+
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     init_watchlist()
+    init_portfolio()
     init_kakao()
-    handle_kakao_callback()   # ← URL에 ?code= 있으면 토큰 교환
+    handle_kakao_callback()
     render_sidebar()
 
     st.markdown("## 📈 한국 주식 분석기")
     st.caption("실시간 데이터 기반 · 기술지표 + 수급 분석 · 투자 판단은 본인 책임")
     st.divider()
 
-    krx = load_krx_stocks()
-    auto_code = st.session_state.pop('auto_code', None)
-    auto_name = st.session_state.pop('auto_name', None)
+    # 포트폴리오 탭의 📊 버튼이 눌렸으면 종목분석 탭 인덱스 지정
+    default_tab = 1 if st.session_state.pop('go_analysis', False) else 0
 
-    query = st.text_input(
-        "🔍 종목명 또는 코드 검색",
-        value=auto_code or '',
-        placeholder="예: 삼성전자 / 005930 / SK하이닉스",
-        key="search_input",
-    )
+    tab_analysis, tab_portfolio = st.tabs(["📊 종목 분석", "💼 포트폴리오"])
 
-    selected_code, selected_name = None, None
-    if query.strip():
-        q = query.strip()
-        if q.isdigit() and len(q) == 6:
-            selected_code = q
-            row = krx[krx['Code'] == q]
-            selected_name = row['Name'].values[0] if not row.empty else KNOWN_NAMES.get(q, f'종목 {q}')
-        else:
-            matches = search_stocks(krx, q)
-            if not matches.empty:
-                options = {f"{r['Name']}  ({r['Code']})": (r['Code'], r['Name'])
-                           for _, r in matches.iterrows()}
-                sel = st.selectbox("종목 선택", list(options.keys()), key="stock_select")
-                selected_code, selected_name = options[sel]
+    # ── 종목 분석 탭 ─────────────────────────────────────────────────────────
+    with tab_analysis:
+        krx = load_krx_stocks()
+        auto_code = st.session_state.pop('auto_code', None)
+        auto_name = st.session_state.pop('auto_name', None)
+
+        query = st.text_input(
+            "🔍 종목명 또는 코드 검색",
+            value=auto_code or '',
+            placeholder="예: 삼성전자 / 005930 / SK하이닉스",
+            key="search_input",
+        )
+
+        selected_code, selected_name = None, None
+        if query.strip():
+            q = query.strip()
+            if q.isdigit() and len(q) == 6:
+                selected_code = q
+                row = krx[krx['Code'] == q]
+                selected_name = (row['Name'].values[0] if not row.empty
+                                 else KNOWN_NAMES.get(q, f'종목 {q}'))
             else:
-                st.warning("검색 결과가 없습니다.")
+                matches = search_stocks(krx, q)
+                if not matches.empty:
+                    options = {f"{r['Name']}  ({r['Code']})": (r['Code'], r['Name'])
+                               for _, r in matches.iterrows()}
+                    sel = st.selectbox("종목 선택", list(options.keys()), key="stock_select")
+                    selected_code, selected_name = options[sel]
+                else:
+                    st.warning("검색 결과가 없습니다.")
 
-    if auto_code and not selected_code:
-        selected_code = auto_code; selected_name = auto_name
+        if auto_code and not selected_code:
+            selected_code = auto_code
+            selected_name = auto_name
 
-    period_map = {"3개월": 3, "6개월": 6, "1년": 12, "2년": 24}
+        period_map = {"3개월": 3, "6개월": 6, "1년": 12, "2년": 24}
 
-    if selected_code:
-        col_p, col_b = st.columns([2, 1])
-        with col_p:
-            period_sel = st.selectbox("조회 기간", ["3개월","6개월","1년","2년"],
-                                      index=2, key="period_sel")
-        with col_b:
-            st.write("")
-            analyze = st.button("📊 분석하기", use_container_width=True, type="primary")
+        if selected_code:
+            col_p, col_b = st.columns([2, 1])
+            with col_p:
+                period_sel = st.selectbox("조회 기간", ["3개월","6개월","1년","2년"],
+                                          index=2, key="period_sel")
+            with col_b:
+                st.write("")
+                analyze = st.button("📊 분석하기", use_container_width=True, type="primary")
 
-        # 분석 실행 → session_state에 저장 (rerun 후에도 유지)
-        if analyze or auto_code:
-            st.session_state['cur_analysis'] = {
-                'code':   selected_code,
-                'name':   selected_name,
-                'months': period_map[period_sel],
-            }
+            if analyze or auto_code:
+                st.session_state['cur_analysis'] = {
+                    'code':   selected_code,
+                    'name':   selected_name,
+                    'months': period_map[period_sel],
+                }
 
-    # 분석 표시: 현재 선택 종목과 저장된 분석이 일치하면 항상 표시
-    cur = st.session_state.get('cur_analysis')
-    if cur and selected_code and cur['code'] == selected_code:
-        st.divider()
-        render_analysis(cur['code'], cur['name'], cur['months'])
-    elif not selected_code and not query.strip():
-        # 다른 종목 검색 시 이전 분석 초기화
-        if 'cur_analysis' in st.session_state:
-            del st.session_state['cur_analysis']
-        st.info("종목명 또는 코드를 검색하세요.\n\n**예시** — `삼성전자` `SK하이닉스` `005930` `에코프로`")
+        cur = st.session_state.get('cur_analysis')
+        if cur and selected_code and cur['code'] == selected_code:
+            st.divider()
+            render_analysis(cur['code'], cur['name'], cur['months'])
+        elif not selected_code and not query.strip():
+            if 'cur_analysis' in st.session_state:
+                del st.session_state['cur_analysis']
+            st.info("종목명 또는 코드를 검색하세요.\n\n"
+                    "**예시** — `삼성전자` `SK하이닉스` `005930` `에코프로`")
+
+    # ── 포트폴리오 탭 ─────────────────────────────────────────────────────────
+    with tab_portfolio:
+        render_portfolio_tab()
 
 
 if __name__ == '__main__':
