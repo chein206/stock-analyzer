@@ -786,6 +786,120 @@ def render_quarterly_earnings(earnings):
     st.caption("※ Yahoo Finance 기준 · 단위: 억원 · 음수=적자")
 
 
+# ── AI 투자 상담 ──────────────────────────────────────────────────────────────
+def ask_ai_advisor(question: str, code: str, name: str, z: dict, sig: dict,
+                   history: list) -> str:
+    """Claude API로 맞춤 투자 상담 답변 생성"""
+    api_key = st.secrets.get("anthropic_api_key", "")
+    if not api_key:
+        return "⚠️ Streamlit Secrets에 `anthropic_api_key`를 추가해 주세요."
+
+    import anthropic
+
+    reasons_txt = "\n".join(
+        f"  {'✅' if s=='pos' else '⚠️' if s=='neg' else 'ℹ️'} {t}"
+        for s, t in sig['reasons']
+    )
+
+    system = f"""당신은 친근하고 실용적인 한국 주식 투자 상담 AI입니다.
+사용자는 주린이(초보 투자자)일 수 있으니 어려운 용어는 쉽게 풀어서 설명하세요.
+
+━━━ 현재 분석 중인 종목 ━━━
+종목: {name} ({code})
+현재가: {int(z['last']):,}원  (전일 대비 {z['day_chg']:+.2f}%)
+종합 신호: {sig['emoji']} {sig['label']}  (점수 {sig['score']}/100)
+
+📌 매매 가격대
+  매수 구간: {int(z['buy_low']):,} ~ {int(z['buy_high']):,}원
+  추천 매수가: {int(z['buy_mid']):,}원
+  손절가: {int(z['stop']):,}원
+  단기 목표가: {int(z['tgt1']):,}원
+  중기 목표가: {int(z['tgt2']):,}원
+  리스크:리워드 = 1:{z['rr']}
+
+📊 기술 지표
+  RSI: {z['rsi']}  (30 이하=과매도, 70 이상=과매수)
+  52주 위치: {z['pos_pct']:.0f}%  (0%=52주 저점, 100%=52주 고점)
+  MA20: {int(z['ma20']):,}원  /  MA60: {int(z['ma60']):,}원
+
+📋 분석 근거
+{reasons_txt}
+━━━━━━━━━━━━━━━━━━━━━━━━━
+
+답변 규칙:
+1. 위 데이터를 적극 활용해 구체적으로 답변하세요 (가격, % 수치 포함).
+2. 사용자가 보유 수량·평균 단가를 알려주면 수익률·손익 계산도 해주세요.
+3. 분할 매수/매도 전략은 2~3단계로 나눠 설명하세요.
+4. 마지막에 항상 "⚠️ 투자 결정과 책임은 본인에게 있습니다" 한 줄 추가.
+5. 절대 수익 보장 표현 금지. 한국어로만 답변."""
+
+    messages = [{"role": m["role"], "content": m["content"]} for m in history]
+    messages.append({"role": "user", "content": question})
+
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=1200,
+        system=system,
+        messages=messages,
+    )
+    return resp.content[0].text
+
+
+def render_ai_chat(code: str, name: str, z: dict, sig: dict):
+    """AI 투자 상담 채팅 UI"""
+    st.markdown("#### 🤖 AI 투자 상담")
+    st.caption("보유 수량·단가를 알려주면 맞춤 매매 전략을 제안해드려요")
+
+    chat_key = f"chat_{code}"
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = []
+
+    # 빠른 질문 버튼
+    quick = [
+        "지금 매수해도 괜찮을까요?",
+        "손절 기준을 어떻게 잡아야 할까요?",
+        "분할 매수 전략을 알려주세요",
+        "지금 고점인가요, 저점인가요?",
+    ]
+    st.markdown("<div style='margin-bottom:6px;font-size:13px;color:#666'>💡 빠른 질문</div>",
+                unsafe_allow_html=True)
+    cols = st.columns(2)
+    for i, q in enumerate(quick):
+        if cols[i % 2].button(q, key=f"quick_{code}_{i}", use_container_width=True):
+            st.session_state[chat_key].append({"role": "user", "content": q})
+            with st.spinner("AI 분석 중..."):
+                answer = ask_ai_advisor(q, code, name, z, sig,
+                                        st.session_state[chat_key][:-1])
+            st.session_state[chat_key].append({"role": "assistant", "content": answer})
+            st.rerun()
+
+    # 대화 기록 표시
+    for msg in st.session_state[chat_key]:
+        with st.chat_message(msg["role"],
+                             avatar="🧑" if msg["role"] == "user" else "🤖"):
+            st.markdown(msg["content"])
+
+    # 입력창
+    placeholder = f"예: {int(z['last']*0.9):,}원에 100주 보유 중인데 매도 계획 어떻게 잡을까요?"
+    if prompt := st.chat_input(placeholder, key=f"chat_input_{code}"):
+        st.session_state[chat_key].append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="🧑"):
+            st.markdown(prompt)
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("AI 분석 중..."):
+                answer = ask_ai_advisor(prompt, code, name, z, sig,
+                                        st.session_state[chat_key][:-1])
+            st.markdown(answer)
+        st.session_state[chat_key].append({"role": "assistant", "content": answer})
+
+    # 대화 초기화
+    if st.session_state[chat_key]:
+        if st.button("🗑️ 대화 초기화", key=f"chat_clear_{code}"):
+            st.session_state[chat_key] = []
+            st.rerun()
+
+
 # ── 분석 결과 ─────────────────────────────────────────────────────────────────
 def render_analysis(code, name, months):
     with st.spinner(f'{name} 데이터 수집 중...'):
@@ -975,6 +1089,10 @@ def render_analysis(code, name, months):
                 if info.get('roe'): st.metric("ROE", f"{info['roe']*100:.1f}%")
             if info.get('sector') and info['sector'] != '-': st.caption(f"섹터: {info['sector']}")
             if info.get('dividend'): st.caption(f"배당수익률: {info['dividend']*100:.2f}%")
+
+    # AI 투자 상담
+    st.divider()
+    render_ai_chat(code, name, z, sig)
 
     st.divider()
     st.caption("⚠️ **투자 주의사항** — 본 분석은 기술적 지표 기반 참고 정보이며 투자 권유가 아닙니다. 모든 투자 판단과 책임은 투자자 본인에게 있습니다.")
