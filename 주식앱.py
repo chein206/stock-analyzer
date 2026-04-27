@@ -838,7 +838,7 @@ def ask_ai_advisor(question: str, code: str, name: str, z: dict, sig: dict,
 
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
-        model="claude-haiku-4-5",
+        model="claude-sonnet-4-5",
         max_tokens=1200,
         system=system,
         messages=messages,
