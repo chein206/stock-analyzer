@@ -69,14 +69,12 @@ html, body, [class*="css"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ── 쿠키 헬퍼 ────────────────────────────────────────────────────────────────
-def _get_ctrl():
-    """CookieController 인스턴스 반환"""
-    try:
-        from streamlit_cookies_controller import CookieController
-        return CookieController()
-    except Exception:
-        return None
+# ── 쿠키 컨트롤러 (스크립트 실행당 딱 1개) ────────────────────────────────────
+try:
+    from streamlit_cookies_controller import CookieController
+    _ctrl = CookieController()          # 매 rerun 마다 1번만 생성 → 충돌 없음
+except Exception:
+    _ctrl = None
 
 
 # ── 카카오 설정 ───────────────────────────────────────────────────────────────
@@ -111,21 +109,19 @@ def _refresh_kakao_token(refresh_token: str):
 
 def _save_kakao_token(token_data: dict):
     """카카오 토큰 쿠키에 저장"""
-    ctrl = _get_ctrl()
-    if ctrl is not None:
+    if _ctrl is not None:
         try:
-            ctrl.set('kakao_token', json.dumps(token_data, ensure_ascii=False),
-                     max_age=60 * 60 * 24 * 30)   # 30일
+            _ctrl.set('kakao_token', json.dumps(token_data, ensure_ascii=False),
+                      max_age=60 * 60 * 24 * 30)   # 30일
         except Exception:
             pass
 
 def _clear_kakao_token():
     """카카오 토큰 초기화"""
     st.session_state['kakao_token'] = None
-    ctrl = _get_ctrl()
-    if ctrl is not None:
+    if _ctrl is not None:
         try:
-            ctrl.remove('kakao_token')
+            _ctrl.remove('kakao_token')
         except Exception:
             pass
 
@@ -137,10 +133,9 @@ def init_kakao():
         st.session_state['kakao_loaded'] = False
 
     if not st.session_state['kakao_loaded']:
-        ctrl = _get_ctrl()
-        if ctrl is not None:
+        if _ctrl is not None:
             try:
-                raw = ctrl.get('kakao_token')
+                raw = _ctrl.get('kakao_token')
                 if raw:
                     token_data = json.loads(raw) if isinstance(raw, str) else raw
                     if token_data and isinstance(token_data, dict):
@@ -301,10 +296,9 @@ def init_watchlist():
     if 'wl_loaded'  not in st.session_state: st.session_state.wl_loaded  = False
 
     if not st.session_state.wl_loaded:
-        ctrl = _get_ctrl()
-        if ctrl is not None:
+        if _ctrl is not None:
             try:
-                raw = ctrl.get('kr_watchlist')
+                raw = _ctrl.get('kr_watchlist')
                 if raw:
                     loaded = json.loads(raw) if isinstance(raw, str) else raw
                     if isinstance(loaded, list):
@@ -316,10 +310,9 @@ def init_watchlist():
 
 def _save_watchlist():
     """관심종목 쿠키에 저장 (1년 유지)"""
-    ctrl = _get_ctrl()
-    if ctrl is not None:
+    if _ctrl is not None:
         try:
-            ctrl.set(
+            _ctrl.set(
                 'kr_watchlist',
                 json.dumps(st.session_state.watchlist, ensure_ascii=False),
                 max_age=60 * 60 * 24 * 365,
