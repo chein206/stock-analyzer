@@ -884,14 +884,11 @@ def render_ai_chat(code: str, name: str, z: dict, sig: dict):
     placeholder = f"예: {int(z['last']*0.9):,}원에 100주 보유 중인데 매도 계획 어떻게 잡을까요?"
     if prompt := st.chat_input(placeholder, key=f"chat_input_{code}"):
         st.session_state[chat_key].append({"role": "user", "content": prompt})
-        with st.chat_message("user", avatar="🧑"):
-            st.markdown(prompt)
-        with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("AI 분석 중..."):
-                answer = ask_ai_advisor(prompt, code, name, z, sig,
-                                        st.session_state[chat_key][:-1])
-            st.markdown(answer)
+        with st.spinner("AI 분석 중..."):
+            answer = ask_ai_advisor(prompt, code, name, z, sig,
+                                    st.session_state[chat_key][:-1])
         st.session_state[chat_key].append({"role": "assistant", "content": answer})
+        st.rerun()   # ← 히스토리 즉시 갱신
 
     # 대화 초기화
     if st.session_state[chat_key]:
@@ -1277,9 +1274,13 @@ def main():
         auto_code = st.session_state.pop('auto_code', None)
         auto_name = st.session_state.pop('auto_name', None)
 
+        # ★ value= 파라미터 대신 session_state 직접 설정
+        #   → rerun 시 검색창이 리셋되지 않아 AI 채팅이 유지됨
+        if auto_code:
+            st.session_state['search_input'] = auto_code
+
         query = st.text_input(
             "🔍 종목명 또는 코드 검색",
-            value=auto_code or '',
             placeholder="예: 삼성전자 / 005930 / SK하이닉스",
             key="search_input",
         )
@@ -1307,6 +1308,7 @@ def main():
             selected_name = auto_name
 
         period_map = {"3개월": 3, "6개월": 6, "1년": 12, "2년": 24}
+        cur = st.session_state.get('cur_analysis')
 
         if selected_code:
             col_p, col_b = st.columns([2, 1])
@@ -1317,20 +1319,25 @@ def main():
                 st.write("")
                 analyze = st.button("📊 분석하기", use_container_width=True, type="primary")
 
+            # 분석 실행: 버튼 or 사이드바 자동실행 → cur_analysis 저장
             if analyze or auto_code:
                 st.session_state['cur_analysis'] = {
                     'code':   selected_code,
                     'name':   selected_name,
                     'months': period_map[period_sel],
                 }
+                cur = st.session_state['cur_analysis']
 
-        cur = st.session_state.get('cur_analysis')
-        if cur and selected_code and cur['code'] == selected_code:
+        # ★ 분석 표시 조건: cur_analysis 가 있으면 항상 표시
+        #   (selected_code 와의 비교 제거 → 채팅 rerun 시 사라지지 않음)
+        if cur:
+            # 다른 종목으로 검색했으면 재분석 안내
+            if selected_code and selected_code != cur['code']:
+                st.info(f"💡 {cur['name']} 분석 중이에요. "
+                        f"새 종목을 보려면 **📊 분석하기** 버튼을 눌러주세요.")
             st.divider()
             render_analysis(cur['code'], cur['name'], cur['months'])
-        elif not selected_code and not query.strip():
-            if 'cur_analysis' in st.session_state:
-                del st.session_state['cur_analysis']
+        elif not query.strip():
             st.info("종목명 또는 코드를 검색하세요.\n\n"
                     "**예시** — `삼성전자` `SK하이닉스` `005930` `에코프로`")
 
