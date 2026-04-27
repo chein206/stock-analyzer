@@ -1251,6 +1251,251 @@ def render_portfolio_tab():
     st.caption("💡 💾 버튼으로 저장하면 다음에 앱을 열어도 단가·수량이 유지돼요")
 
 
+# ── 스크리너 ─────────────────────────────────────────────────────────────────
+SCREEN_UNIVERSE = {
+    # 반도체
+    '005930': ('삼성전자',      '반도체'),
+    '000660': ('SK하이닉스',    '반도체'),
+    '042700': ('한미반도체',    '반도체'),
+    '091990': ('셀트리온헬스케어','반도체'),
+    '357780': ('솔브레인',      '반도체'),
+    # 2차전지
+    '373220': ('LG에너지솔루션','2차전지'),
+    '006400': ('삼성SDI',       '2차전지'),
+    '051910': ('LG화학',        '2차전지'),
+    '247540': ('에코프로비엠',  '2차전지'),
+    '086520': ('에코프로',      '2차전지'),
+    '096770': ('SK이노베이션',  '2차전지'),
+    '278280': ('천보',          '2차전지'),
+    # 바이오/제약
+    '207940': ('삼성바이오로직스','바이오'),
+    '068270': ('셀트리온',      '바이오'),
+    '128940': ('한미약품',      '바이오'),
+    '196170': ('알테오젠',      '바이오'),
+    '145020': ('휴젤',          '바이오'),
+    '000100': ('유한양행',      '바이오'),
+    '326030': ('SK바이오팜',    '바이오'),
+    # 자동차
+    '005380': ('현대차',        '자동차'),
+    '000270': ('기아',          '자동차'),
+    '012330': ('현대모비스',    '자동차'),
+    '011210': ('현대위아',      '자동차'),
+    # 조선/방산
+    '329180': ('HD현대중공업',  '조선/방산'),
+    '042660': ('한화오션',      '조선/방산'),
+    '010140': ('삼성중공업',    '조선/방산'),
+    '012450': ('한화에어로스페이스','조선/방산'),
+    '047810': ('한국항공우주',  '조선/방산'),
+    # IT/플랫폼
+    '035420': ('NAVER',         'IT'),
+    '035720': ('카카오',        'IT'),
+    '259960': ('크래프톤',      'IT'),
+    '036570': ('NC소프트',      'IT'),
+    '251270': ('넷마블',        'IT'),
+    '263750': ('펄어비스',      'IT'),
+    # 금융
+    '105560': ('KB금융',        '금융'),
+    '055550': ('신한지주',      '금융'),
+    '086790': ('하나금융지주',  '금융'),
+    '032830': ('삼성생명',      '금융'),
+    '000810': ('삼성화재',      '금융'),
+    '316140': ('우리금융지주',  '금융'),
+    # 전기전자/디스플레이
+    '066570': ('LG전자',        '전기전자'),
+    '034220': ('LG디스플레이',  '전기전자'),
+    '009150': ('삼성전기',      '전기전자'),
+    # 철강/소재
+    '005490': ('POSCO홀딩스',   '철강/소재'),
+    '004020': ('현대제철',      '철강/소재'),
+    # 통신
+    '017670': ('SK텔레콤',      '통신'),
+    '030200': ('KT',            '통신'),
+    '032640': ('LG유플러스',    '통신'),
+    # 유통/소비
+    '139480': ('이마트',        '유통'),
+    '004170': ('신세계',        '유통'),
+    '090430': ('아모레퍼시픽',  '유통'),
+    '000720': ('현대건설',      '유통'),
+    # 에너지/화학
+    '034730': ('SK',            '에너지'),
+    '015760': ('한국전력',      '에너지'),
+    # 항공/물류
+    '003490': ('대한항공',      '항공/물류'),
+    '011200': ('HMM',           '항공/물류'),
+    # 지주/기타
+    '003550': ('LG',            '기타'),
+    '028260': ('삼성물산',      '기타'),
+    '005940': ('NH투자증권',    '기타'),
+}
+
+
+def _scan_one(args):
+    """단일 종목 스캔 (멀티스레드용)"""
+    code, name, sector = args
+    try:
+        df_raw = get_stock_data(code, 3)
+        if df_raw is None or df_raw.empty or len(df_raw) < 20:
+            return None
+        df  = calc_indicators(df_raw)
+        z   = calc_zones(df, {})
+        sig = calc_signal(df, z)
+        return {
+            'code': code, 'name': name, 'sector': sector,
+            'score':   sig['score'],
+            'emoji':   sig['emoji'],
+            'label':   sig['label'],
+            'price':   int(z['last']),
+            'day_chg': round(z['day_chg'], 2),
+            'rsi':     z['rsi'],
+            'pos_pct': round(z['pos_pct'], 1),
+            'buy_mid': int(z['buy_mid']),
+            'stop':    int(z['stop']),
+            'tgt1':    int(z['tgt1']),
+            'rr':      z['rr'],
+        }
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def run_screen(min_score: int, max_rsi: int, max_pos_pct: int, sectors: tuple) -> list:
+    """전체 유니버스 병렬 스캔 (1시간 캐시)"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    args_list = [
+        (code, info[0], info[1])
+        for code, info in SCREEN_UNIVERSE.items()
+        if '전체' in sectors or info[1] in sectors
+    ]
+    results = []
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        futures = {ex.submit(_scan_one, a): a for a in args_list}
+        for f in as_completed(futures):
+            r = f.result()
+            if r is None:
+                continue
+            if r['score'] < min_score:
+                continue
+            if r['rsi'] and r['rsi'] > max_rsi:
+                continue
+            if r['pos_pct'] > max_pos_pct:
+                continue
+            results.append(r)
+    return sorted(results, key=lambda x: x['score'], reverse=True)
+
+
+def render_screener_tab():
+    st.markdown("### 🔍 종목 스크리너")
+    st.caption("조건에 맞는 종목을 자동 스캔 · 신호 점수 순 정렬 · 1시간 캐시")
+
+    # ── 조건 설정 ────────────────────────────────────────────────────────────
+    with st.expander("⚙️ 스캔 조건 설정", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            min_score = st.slider(
+                "🎯 최소 신호 점수", 50, 85, 65, step=5,
+                help="65 이상 = 매수 고려 / 높을수록 강한 신호만 표시")
+        with c2:
+            max_rsi = st.slider(
+                "📉 RSI 상한선", 40, 75, 60, step=5,
+                help="낮을수록 과매도 구간 종목만 표시 (30=과매도, 70=과매수)")
+        with c3:
+            max_pos_pct = st.slider(
+                "📍 52주 위치 상한 (%)", 30, 80, 55, step=5,
+                help="낮을수록 52주 저점 근처 종목만 표시")
+
+        all_sectors = ['전체', '반도체', '2차전지', '바이오', '자동차',
+                       '조선/방산', 'IT', '금융', '전기전자', '철강/소재',
+                       '통신', '유통', '에너지', '항공/물류', '기타']
+        selected_sectors = st.multiselect(
+            "🏭 섹터 선택 (미선택 시 전체)", all_sectors[1:],
+            placeholder="전체 섹터 스캔")
+        if not selected_sectors:
+            selected_sectors = ['전체']
+
+    scan_btn = st.button("🔍 스캔 시작", type="primary", use_container_width=True)
+
+    # 이전 결과 표시
+    if 'screen_results' not in st.session_state:
+        st.session_state.screen_results = None
+    if 'screen_params' not in st.session_state:
+        st.session_state.screen_params = None
+
+    if scan_btn:
+        params = (min_score, max_rsi, max_pos_pct, tuple(sorted(selected_sectors)))
+        with st.spinner(f"🔄 {len(SCREEN_UNIVERSE)}개 종목 스캔 중... (30초~1분 소요)"):
+            results = run_screen(*params)
+        st.session_state.screen_results = results
+        st.session_state.screen_params  = params
+
+    results = st.session_state.screen_results
+    if results is None:
+        st.info("조건을 설정하고 **🔍 스캔 시작** 버튼을 눌러주세요.\n\n"
+                "💡 기본 조건: 신호 65점↑ · RSI 60↓ · 52주 위치 55%↓")
+        return
+
+    # ── 결과 표시 ────────────────────────────────────────────────────────────
+    if not results:
+        st.warning("조건에 맞는 종목이 없어요. 조건을 완화해보세요.")
+        return
+
+    st.success(f"✅ **{len(results)}개** 종목 발견!")
+    st.caption("💡 종목명 클릭 → 상세 분석 탭으로 이동")
+
+    for i, r in enumerate(results):
+        up    = r['day_chg'] >= 0
+        arrow = '▲' if up else '▼'
+        pc    = '#C0392B' if up else '#1A5FAC'
+        loss  = round((r['buy_mid'] - r['stop'])  / r['buy_mid'] * 100, 1) if r['buy_mid'] else 0
+        gain  = round((r['tgt1']   - r['buy_mid'])/ r['buy_mid'] * 100, 1) if r['buy_mid'] else 0
+
+        with st.container():
+            rc1, rc2, rc3, rc4 = st.columns([3, 3, 3, 1])
+
+            with rc1:
+                st.markdown(
+                    f"<div style='font-size:15px;font-weight:800'>"
+                    f"{i+1}위 {r['emoji']} {r['name']}</div>"
+                    f"<div style='font-size:12px;color:#888'>{r['sector']} · {r['code']}</div>",
+                    unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='color:{pc};font-weight:700'>"
+                    f"{r['price']:,}원 {arrow}{abs(r['day_chg']):.2f}%</span>",
+                    unsafe_allow_html=True)
+
+            with rc2:
+                st.markdown(
+                    f"<div style='font-size:12px;color:#888;margin-bottom:4px'>신호 점수</div>"
+                    f"<div style='font-size:22px;font-weight:900;color:#1D9E75'>{r['score']}</div>"
+                    f"<div style='font-size:11px;color:#888'>{r['label']}</div>",
+                    unsafe_allow_html=True)
+
+            with rc3:
+                rsi_c = '#1D9E75' if r['rsi'] and r['rsi'] < 40 else ('#E24B4A' if r['rsi'] and r['rsi'] > 65 else '#555')
+                st.markdown(
+                    f"<div style='font-size:12px;line-height:1.9'>"
+                    f"RSI: <b style='color:{rsi_c}'>{r['rsi']}</b> · "
+                    f"52주: <b>{r['pos_pct']:.0f}%</b><br>"
+                    f"매수가: <b>{r['buy_mid']:,}원</b><br>"
+                    f"손절: <b style='color:#E24B4A'>-{loss}%</b> · "
+                    f"목표: <b style='color:#1D9E75'>+{gain}%</b> · "
+                    f"R:R=1:{r['rr']}"
+                    f"</div>",
+                    unsafe_allow_html=True)
+
+            with rc4:
+                st.markdown("<div style='padding-top:6px'>", unsafe_allow_html=True)
+                if st.button("📊 분석", key=f"scr_{r['code']}", use_container_width=True):
+                    st.session_state['auto_code'] = r['code']
+                    st.session_state['auto_name'] = r['name']
+                    st.session_state['go_analysis'] = True
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.divider()
+
+    st.caption(f"⏱ 결과는 1시간 캐시됩니다. 새로 스캔하려면 버튼을 다시 눌러주세요.")
+
+
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     init_watchlist()
@@ -1266,7 +1511,7 @@ def main():
     # 포트폴리오 탭의 📊 버튼이 눌렸으면 종목분석 탭 인덱스 지정
     default_tab = 1 if st.session_state.pop('go_analysis', False) else 0
 
-    tab_analysis, tab_portfolio = st.tabs(["📊 종목 분석", "💼 포트폴리오"])
+    tab_analysis, tab_portfolio, tab_screen = st.tabs(["📊 종목 분석", "💼 포트폴리오", "🔍 스크리너"])
 
     # ── 종목 분석 탭 ─────────────────────────────────────────────────────────
     with tab_analysis:
@@ -1344,6 +1589,10 @@ def main():
     # ── 포트폴리오 탭 ─────────────────────────────────────────────────────────
     with tab_portfolio:
         render_portfolio_tab()
+
+    # ── 스크리너 탭 ───────────────────────────────────────────────────────────
+    with tab_screen:
+        render_screener_tab()
 
 
 if __name__ == '__main__':
