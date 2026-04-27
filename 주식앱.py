@@ -1508,10 +1508,21 @@ def main():
     st.caption("실시간 데이터 기반 · 기술지표 + 수급 분석 · 투자 판단은 본인 책임")
     st.divider()
 
-    # 포트폴리오 탭의 📊 버튼이 눌렸으면 종목분석 탭 인덱스 지정
-    default_tab = 1 if st.session_state.pop('go_analysis', False) else 0
+    # 스크리너/포트폴리오 📊 버튼 → 종목 분석 탭으로 JS 자동 전환
+    go_analysis = st.session_state.pop('go_analysis', False)
 
     tab_analysis, tab_portfolio, tab_screen = st.tabs(["📊 종목 분석", "💼 포트폴리오", "🔍 스크리너"])
+
+    if go_analysis:
+        import streamlit.components.v1 as components
+        components.html("""
+        <script>
+            setTimeout(function() {
+                var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+                if (tabs && tabs.length > 0) tabs[0].click();
+            }, 300);
+        </script>
+        """, height=0)
 
     # ── 종목 분석 탭 ─────────────────────────────────────────────────────────
     with tab_analysis:
