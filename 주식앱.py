@@ -366,16 +366,17 @@ def render_sidebar():
                 _clear_kakao_token(); st.rerun()
         else:
             if KAKAO_REST_KEY:
-                if st.button("🔗 카카오 로그인", use_container_width=True):
-                    try:
-                        from streamlit_js_eval import streamlit_js_eval
-                        streamlit_js_eval(
-                            js_expressions=f"window.top.location.href = '{kakao_auth_url()}'",
-                            key="kakao_login_redirect"
-                        )
-                    except Exception:
-                        st.markdown(f"[카카오 로그인 링크]({kakao_auth_url()})")
-                st.caption("버튼 클릭 → 카카오 로그인 → 앱으로 자동 복귀")
+                url = kakao_auth_url()
+                st.markdown(
+                    f'<a href="{url}" target="_top" style="'
+                    'display:block;text-align:center;text-decoration:none;'
+                    'background:#FEE500;border-radius:8px;padding:10px 0;'
+                    'font-weight:700;font-size:14px;color:#191919;cursor:pointer;'
+                    'margin:4px 0">'
+                    '🔗 카카오 로그인</a>',
+                    unsafe_allow_html=True,
+                )
+                st.caption("위 버튼 클릭 → 카카오 로그인 → 앱 자동 복귀")
             else:
                 st.warning("Secrets에 kakao_rest_key를\n설정해주세요")
 
