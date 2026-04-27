@@ -1140,6 +1140,8 @@ def main():
     if auto_code and not selected_code:
         selected_code = auto_code; selected_name = auto_name
 
+    period_map = {"3개월": 3, "6개월": 6, "1년": 12, "2년": 24}
+
     if selected_code:
         col_p, col_b = st.columns([2, 1])
         with col_p:
@@ -1148,13 +1150,25 @@ def main():
         with col_b:
             st.write("")
             analyze = st.button("📊 분석하기", use_container_width=True, type="primary")
+
+        # 분석 실행 → session_state에 저장 (rerun 후에도 유지)
         if analyze or auto_code:
-            period_map = {"3개월":3,"6개월":6,"1년":12,"2년":24}
-            st.divider()
-            render_analysis(selected_code, selected_name, period_map[period_sel])
-    else:
-        if not query.strip():
-            st.info("종목명 또는 코드를 검색하세요.\n\n**예시** — `삼성전자` `SK하이닉스` `005930` `에코프로`")
+            st.session_state['cur_analysis'] = {
+                'code':   selected_code,
+                'name':   selected_name,
+                'months': period_map[period_sel],
+            }
+
+    # 분석 표시: 현재 선택 종목과 저장된 분석이 일치하면 항상 표시
+    cur = st.session_state.get('cur_analysis')
+    if cur and selected_code and cur['code'] == selected_code:
+        st.divider()
+        render_analysis(cur['code'], cur['name'], cur['months'])
+    elif not selected_code and not query.strip():
+        # 다른 종목 검색 시 이전 분석 초기화
+        if 'cur_analysis' in st.session_state:
+            del st.session_state['cur_analysis']
+        st.info("종목명 또는 코드를 검색하세요.\n\n**예시** — `삼성전자` `SK하이닉스` `005930` `에코프로`")
 
 
 if __name__ == '__main__':
