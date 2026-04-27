@@ -1,5 +1,5 @@
 streamlit
-streamlit-js-eval
+streamlit-cookies-controller
 finance-datareader
 yfinance
 plotly

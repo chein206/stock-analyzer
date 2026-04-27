@@ -1,7 +1,8 @@
 """
-주식 분석기 v2.3
+주식 분석기 v3.0
 - 종목명/코드 검색
-- 관심종목 저장
+- 관심종목 저장 (쿠키 기반, 브라우저 재시작 후에도 유지)
+- 사이드바 미니 신호판 (현재가 + 등락 실시간 표시)
 - 기관/외국인 수급 분석
 - 분기 실적 추이
 - 카카오톡 분석 결과 전송
@@ -56,6 +57,10 @@ html, body, [class*="css"] {
     border-radius: 10px; padding: 12px;
     text-align: center; margin-bottom: 4px;
 }
+.mini-card {
+    background: #F4F4F4; border-radius: 10px;
+    padding: 8px 10px; margin: 4px 0 2px;
+}
 @media (max-width: 640px) {
     .signal-label { font-size: 20px; }
     .signal-emoji { font-size: 36px; }
@@ -63,6 +68,16 @@ html, body, [class*="css"] {
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ── 쿠키 헬퍼 ────────────────────────────────────────────────────────────────
+def _get_ctrl():
+    """CookieController 인스턴스 반환"""
+    try:
+        from streamlit_cookies_controller import CookieController
+        return CookieController()
+    except Exception:
+        return None
+
 
 # ── 카카오 설정 ───────────────────────────────────────────────────────────────
 KAKAO_REST_KEY  = st.secrets.get("kakao_rest_key", "")
@@ -95,54 +110,44 @@ def _refresh_kakao_token(refresh_token: str):
     return r.status_code, r.json()
 
 def _save_kakao_token(token_data: dict):
-    try:
-        from streamlit_js_eval import streamlit_js_eval
-        data = json.dumps(token_data, ensure_ascii=False)
-        cnt  = st.session_state.get('kakao_save_cnt', 0)
-        streamlit_js_eval(
-            js_expressions=f"localStorage.setItem('kakao_token', {json.dumps(data)}); 1",
-            key=f"kakao_save_{cnt}"
-        )
-        st.session_state['kakao_save_cnt'] = cnt + 1
-    except Exception:
-        pass
+    """카카오 토큰 쿠키에 저장"""
+    ctrl = _get_ctrl()
+    if ctrl is not None:
+        try:
+            ctrl.set('kakao_token', json.dumps(token_data, ensure_ascii=False),
+                     max_age=60 * 60 * 24 * 30)   # 30일
+        except Exception:
+            pass
 
 def _clear_kakao_token():
+    """카카오 토큰 초기화"""
     st.session_state['kakao_token'] = None
-    try:
-        from streamlit_js_eval import streamlit_js_eval
-        cnt = st.session_state.get('kakao_save_cnt', 0)
-        streamlit_js_eval(
-            js_expressions="localStorage.removeItem('kakao_token'); 1",
-            key=f"kakao_clear_{cnt}"
-        )
-        st.session_state['kakao_save_cnt'] = cnt + 1
-    except Exception:
-        pass
+    ctrl = _get_ctrl()
+    if ctrl is not None:
+        try:
+            ctrl.remove('kakao_token')
+        except Exception:
+            pass
 
 def init_kakao():
-    """앱 시작 시 localStorage에서 카카오 토큰 로드"""
-    if 'kakao_token'    not in st.session_state:
+    """앱 시작 시 쿠키에서 카카오 토큰 로드"""
+    if 'kakao_token'  not in st.session_state:
         st.session_state['kakao_token'] = None
-    if 'kakao_loaded'   not in st.session_state:
+    if 'kakao_loaded' not in st.session_state:
         st.session_state['kakao_loaded'] = False
-    if 'kakao_save_cnt' not in st.session_state:
-        st.session_state['kakao_save_cnt'] = 0
 
     if not st.session_state['kakao_loaded']:
-        try:
-            from streamlit_js_eval import streamlit_js_eval
-            raw = streamlit_js_eval(
-                js_expressions="localStorage.getItem('kakao_token') || 'null'",
-                key="kakao_init"
-            )
-            if raw is not None:
-                token_data = json.loads(raw)
-                if token_data:
-                    st.session_state['kakao_token'] = token_data
-                st.session_state['kakao_loaded'] = True
-        except Exception:
-            st.session_state['kakao_loaded'] = True
+        ctrl = _get_ctrl()
+        if ctrl is not None:
+            try:
+                raw = ctrl.get('kakao_token')
+                if raw:
+                    token_data = json.loads(raw) if isinstance(raw, str) else raw
+                    if token_data and isinstance(token_data, dict):
+                        st.session_state['kakao_token'] = token_data
+            except Exception:
+                pass
+        st.session_state['kakao_loaded'] = True
 
 def handle_kakao_callback():
     """URL에 ?code= 가 있으면 토큰 교환 처리"""
@@ -289,38 +294,38 @@ def search_stocks(krx, query):
     return krx[mask].head(12)
 
 
-# ── 관심종목 ──────────────────────────────────────────────────────────────────
+# ── 관심종목 (쿠키 기반) ──────────────────────────────────────────────────────
 def init_watchlist():
-    if 'watchlist'    not in st.session_state: st.session_state.watchlist    = []
-    if 'wl_loaded'    not in st.session_state: st.session_state.wl_loaded    = False
-    if 'wl_save_cnt'  not in st.session_state: st.session_state.wl_save_cnt  = 0
+    """쿠키에서 관심종목 불러오기"""
+    if 'watchlist'  not in st.session_state: st.session_state.watchlist  = []
+    if 'wl_loaded'  not in st.session_state: st.session_state.wl_loaded  = False
 
     if not st.session_state.wl_loaded:
-        try:
-            from streamlit_js_eval import streamlit_js_eval
-            raw = streamlit_js_eval(
-                js_expressions="localStorage.getItem('kr_watchlist') || '[]'",
-                key="wl_init"
-            )
-            if raw is not None:
-                st.session_state.watchlist = json.loads(raw)
-                st.session_state.wl_loaded = True
-        except Exception:
-            st.session_state.wl_loaded = True
+        ctrl = _get_ctrl()
+        if ctrl is not None:
+            try:
+                raw = ctrl.get('kr_watchlist')
+                if raw:
+                    loaded = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(loaded, list):
+                        st.session_state.watchlist = loaded
+            except Exception:
+                pass
+        st.session_state.wl_loaded = True
 
 
 def _save_watchlist():
-    try:
-        from streamlit_js_eval import streamlit_js_eval
-        data = json.dumps(st.session_state.watchlist, ensure_ascii=False)
-        cnt  = st.session_state.wl_save_cnt
-        streamlit_js_eval(
-            js_expressions=f"localStorage.setItem('kr_watchlist', {json.dumps(data)}); 1",
-            key=f"wl_save_{cnt}"
-        )
-        st.session_state.wl_save_cnt += 1
-    except Exception:
-        pass
+    """관심종목 쿠키에 저장 (1년 유지)"""
+    ctrl = _get_ctrl()
+    if ctrl is not None:
+        try:
+            ctrl.set(
+                'kr_watchlist',
+                json.dumps(st.session_state.watchlist, ensure_ascii=False),
+                max_age=60 * 60 * 24 * 365,
+            )
+        except Exception:
+            pass
 
 def add_to_watchlist(code, name):
     if not any(i['code'] == code for i in st.session_state.watchlist):
@@ -335,28 +340,95 @@ def in_watchlist(code):
     return any(i['code'] == code for i in st.session_state.watchlist)
 
 
+# ── 사이드바 미니 신호판용 빠른 현재가 ───────────────────────────────────────
+@st.cache_data(ttl=300)   # 5분 캐시
+def get_quick_price(code: str) -> dict | None:
+    """현재가와 등락률 반환 (사이드바 미니 신호판용)"""
+    from datetime import datetime, timedelta
+    end = datetime.today()
+    start = end - timedelta(days=7)
+    s, e = start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+
+    # FinanceDataReader 우선
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.DataReader(code, s, e)
+        if df is not None and not df.empty and len(df) >= 2:
+            df.columns = [c.capitalize() for c in df.columns]
+            last = float(df['Close'].iloc[-1])
+            prev = float(df['Close'].iloc[-2])
+            return {'price': last, 'chg_pct': (last / prev - 1) * 100}
+    except Exception:
+        pass
+
+    # yfinance fallback
+    try:
+        import yfinance as yf
+        for suffix in ['.KS', '.KQ']:
+            hist = yf.Ticker(f'{code}{suffix}').history(period='5d')
+            if hist is not None and not hist.empty and len(hist) >= 2:
+                last = float(hist['Close'].iloc[-1])
+                prev = float(hist['Close'].iloc[-2])
+                return {'price': last, 'chg_pct': (last / prev - 1) * 100}
+    except Exception:
+        pass
+
+    return None
+
+
 # ── 사이드바 ──────────────────────────────────────────────────────────────────
 def render_sidebar():
     with st.sidebar:
-        # 관심종목
+        # ── 미니 신호판 ──────────────────────────────────────
         st.markdown("## ⭐ 관심종목")
         wl = st.session_state.get('watchlist', [])
+
         if not wl:
-            st.caption("아직 추가된 종목이 없어요.\n분석 후 ⭐ 버튼으로 추가하세요.")
+            st.markdown(
+                "<div style='color:#999;font-size:13px;padding:8px 0'>"
+                "아직 추가된 종목이 없어요.<br>"
+                "분석 후 ☆ 버튼으로 추가하세요.</div>",
+                unsafe_allow_html=True,
+            )
         else:
             for item in wl:
-                c1, c2 = st.columns([5, 1])
-                with c1:
-                    if st.button(f"📊 {item['name']}", key=f"wl_btn_{item['code']}",
-                                 use_container_width=True):
-                        st.session_state['auto_code'] = item['code']
-                        st.session_state['auto_name'] = item['name']
-                        st.rerun()
-                with c2:
-                    if st.button("✕", key=f"wl_del_{item['code']}"):
-                        remove_from_watchlist(item['code']); st.rerun()
+                code = item['code']
+                name = item['name']
+                pinfo = get_quick_price(code)
 
-        # 카카오톡 연결
+                if pinfo:
+                    price   = pinfo['price']
+                    chg     = pinfo['chg_pct']
+                    up      = chg >= 0
+                    arrow   = '▲' if up else '▼'
+                    dot     = '🟢' if up else '🔴'
+                    p_color = '#C0392B' if up else '#1A5FAC'   # 한국식: 상승=빨강, 하락=파랑
+                    price_str = f"{int(price):,}원 {arrow}{abs(chg):.2f}%"
+                else:
+                    dot       = '⚪'
+                    p_color   = '#888'
+                    price_str = '데이터 없음'
+
+                # 종목 카드
+                st.markdown(
+                    f"<div class='mini-card'>"
+                    f"<span style='font-size:14px;font-weight:700'>{dot} {name}</span>"
+                    f"<br><span style='font-size:12px;color:{p_color};padding-left:4px'>{price_str}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                btn_c, del_c = st.columns([5, 1])
+                with btn_c:
+                    if st.button(f"📊 분석", key=f"wl_btn_{code}", use_container_width=True):
+                        st.session_state['auto_code'] = code
+                        st.session_state['auto_name'] = name
+                        st.rerun()
+                with del_c:
+                    if st.button("✕", key=f"wl_del_{code}"):
+                        remove_from_watchlist(code)
+                        st.rerun()
+
+        # ── 카카오톡 연결 ─────────────────────────────────────
         st.divider()
         st.markdown("### 📱 카카오톡 알림")
         kakao_token = st.session_state.get('kakao_token')
@@ -768,7 +840,6 @@ def render_analysis(code, name, months):
                         st.toast("카카오톡으로 전송했어요! ✅", icon="📱")
                     else:
                         err = result.get('msg', str(result))
-                        # 토큰 만료 에러 처리
                         if result.get('code') in (-401, -403):
                             _clear_kakao_token()
                             st.warning("카카오 토큰이 만료됐어요. 사이드바에서 다시 로그인해주세요.")
