@@ -1019,6 +1019,103 @@ def calc_signal(df, z, flow_df=None):
     return dict(score=score, emoji=emoji, label=label, color=color, bg=bg, desc=desc, reasons=reasons)
 
 
+def build_signal_detail(z: dict, sig: dict, df) -> str:
+    """신호 박스용 수치 기반 상세 설명 HTML 생성."""
+    rsi     = z.get('rsi')
+    pos     = z.get('pos_pct', 50)
+    last    = z['last']
+    score   = sig['score']
+    buy_low = z['buy_low']
+    buy_high= z['buy_high']
+    buy_mid = z['buy_mid']
+    stop    = z['stop']
+    tgt1    = z['tgt1']
+    ma20    = z['ma20']
+    ma60    = z['ma60']
+
+    # ── 지표 요약 칩 ──────────────────────────────────────────────
+    chips = []
+
+    # RSI
+    if rsi is not None:
+        if   rsi < 30:  chips.append(('pos', f'RSI {rsi:.0f} 과매도'))
+        elif rsi < 45:  chips.append(('pos', f'RSI {rsi:.0f} 저점권'))
+        elif rsi > 70:  chips.append(('neg', f'RSI {rsi:.0f} 과매수'))
+        elif rsi > 60:  chips.append(('neu', f'RSI {rsi:.0f} 다소 높음'))
+        else:           chips.append(('neu', f'RSI {rsi:.0f} 중립'))
+
+    # 52주 위치
+    if   pos < 25:  chips.append(('pos', f'52주 {pos:.0f}% 저점권'))
+    elif pos < 40:  chips.append(('pos', f'52주 {pos:.0f}%'))
+    elif pos > 85:  chips.append(('neg', f'52주 {pos:.0f}% 고점권'))
+    else:           chips.append(('neu', f'52주 {pos:.0f}%'))
+
+    # 볼린저밴드 위치
+    bb_lower = df['BB_lower'].iloc[-1]
+    bb_upper = df['BB_upper'].iloc[-1]
+    bb_range = bb_upper - bb_lower
+    if bb_range > 0:
+        bb_pct = (last - bb_lower) / bb_range
+        if   bb_pct < 0.15: chips.append(('pos', f'볼린저 하단 ({bb_pct*100:.0f}%)'))
+        elif bb_pct < 0.40: chips.append(('pos', f'볼린저 하단~중단 ({bb_pct*100:.0f}%)'))
+        elif bb_pct > 0.85: chips.append(('neg', f'볼린저 상단 ({bb_pct*100:.0f}%)'))
+        else:               chips.append(('neu', f'볼린저 중단 ({bb_pct*100:.0f}%)'))
+
+    # MACD
+    macd_v = df['MACD'].iloc[-1]; macd_s = df['MACD_signal'].iloc[-1]
+    macd_h = df['MACD_hist'].iloc[-1]
+    macd_hp= df['MACD_hist'].iloc[-2] if len(df) > 1 else macd_h
+    if   macd_v > macd_s and macd_h > macd_hp: chips.append(('pos', 'MACD 상승전환'))
+    elif macd_v < macd_s and macd_h < macd_hp: chips.append(('neg', 'MACD 하락전환'))
+    else: chips.append(('neu', 'MACD 혼조'))
+
+    # 이동평균 배열
+    ma5 = df['MA5'].iloc[-1]
+    if   ma5 > ma20 > ma60: chips.append(('pos', '이평 정배열'))
+    elif ma5 < ma20 < ma60: chips.append(('neg', '이평 역배열'))
+    else:                   chips.append(('neu', '이평 혼조'))
+
+    # ── 칩 HTML ───────────────────────────────────────────────────
+    chip_colors = {'pos': '#1D9E75', 'neg': '#E24B4A', 'neu': '#888'}
+    chip_bg     = {'pos': 'rgba(29,158,117,0.12)',
+                   'neg': 'rgba(226,75,74,0.12)',
+                   'neu': 'rgba(136,136,136,0.10)'}
+    chip_html = ''.join(
+        f"<span style='display:inline-block;margin:2px 3px;"
+        f"padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600;"
+        f"color:{chip_colors[s]};background:{chip_bg[s]}'>{t}</span>"
+        for s, t in chips[:5]
+    )
+
+    # ── 액션 문장 ─────────────────────────────────────────────────
+    dist_to_buy = (last - buy_high) / buy_high * 100  # 양수=매수구간 위, 음수=이미 진입
+    dist_pct    = abs(dist_to_buy)
+
+    if score >= 65:
+        if last <= buy_high:
+            action = (f"현재가 <b>{int(last):,}원</b>이 매수 구간 "
+                      f"<b>{int(buy_low):,}~{int(buy_high):,}원</b> 안에 있어요. "
+                      f"손절 <b>{int(stop):,}원</b> / 목표 <b>{int(tgt1):,}원</b> 기준으로 분할 매수를 고려해보세요.")
+        elif dist_pct <= 3:
+            action = (f"매수 구간 <b>{int(buy_low):,}~{int(buy_high):,}원</b>보다 "
+                      f"<b>{dist_pct:.1f}%</b> 위에 있어요. 소폭 눌림목 후 진입 고려.")
+        else:
+            action = (f"현재가 <b>{int(last):,}원</b>가 매수 구간 <b>{int(buy_high):,}원</b>보다 "
+                      f"<b>{dist_pct:.1f}%</b> 높아요. 충분한 눌림목 후 분할 진입 전략 권장.")
+    elif score >= 45:
+        action = (f"뚜렷한 방향성이 없어요. MA20 <b>{int(ma20):,}원</b> · MA60 <b>{int(ma60):,}원</b> "
+                  f"지지 여부를 확인 후, 매수 구간 <b>{int(buy_low):,}~{int(buy_high):,}원</b> 진입 시 재판단 권장.")
+    else:
+        action = (f"현재 하락 추세 또는 고점 신호 다수. "
+                  f"매수 구간 <b>{int(buy_low):,}원</b> 이하로 충분히 내려올 때까지 관망을 권장해요. "
+                  f"무리한 매수 보류.")
+
+    return (
+        f"<div style='margin-top:4px'>{chip_html}</div>"
+        f"<div style='margin-top:10px;font-size:13px;line-height:1.7;opacity:0.9'>{action}</div>"
+    )
+
+
 def price_position(last, z):
     if last < z['stop']:     return ('🔴', '손절 구간 아래입니다 — 보유 중이라면 손절 고려',              '#FEF0F0', '#E24B4A')
     if last <= z['buy_low']: return ('🎯', '매수 구간에 접근 중 — 분할 매수 고려',                       '#E8F8F2', '#1D9E75')
@@ -1401,12 +1498,13 @@ def render_analysis(code, name, months):
 
     # 신호 박스
     s = sig
+    signal_detail = build_signal_detail(z, sig, df)
     st.markdown(
         f"<div class='signal-box' style='background:{s['bg']};border:2px solid {s['color']}55'>"
         f"<div class='signal-emoji'>{s['emoji']}</div>"
         f"<div class='signal-label' style='color:{s['color']}'>{s['label']}</div>"
         f"<div class='signal-score' style='color:{s['color']}'>종합 점수 {s['score']}/100 (기술지표 + 수급)</div>"
-        f"<div class='signal-desc'>{s['desc']}</div></div>", unsafe_allow_html=True)
+        f"<div class='signal-desc'>{signal_detail}</div></div>", unsafe_allow_html=True)
 
     # 현재가 위치
     icon, msg, bg, col = price_position(z['last'], z)
