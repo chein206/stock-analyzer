@@ -1261,6 +1261,21 @@ def render_analysis(code, name, months):
 
     df  = calc_indicators(df_raw)
     z   = calc_zones(df, info)
+
+    # ── KIS 실시간 현재가로 z 핵심 수치 교체 ────────────────────────────
+    # calc_zones 는 FDR 종가(지연) 기준으로 계산됨
+    # KIS 실시간 가격이 있으면 last · day_chg 만 교체 → AI에게도 실시간 맥락 전달
+    if _kis_data and _kis_data.get('price'):
+        kis_last    = _kis_data['price']
+        kis_chg     = _kis_data.get('chg_pct', z['day_chg'])
+        # 매매 가격대(buy_mid/stop/tgt)는 기술지표 기반이라 그대로 유지
+        z['last']    = kis_last
+        z['day_chg'] = kis_chg
+        # 52주 위치도 KIS 실시간 가격으로 재계산
+        wh, wl = z['w52_high'], z['w52_low']
+        if wh != wl:
+            z['pos_pct'] = round((kis_last - wl) / (wh - wl) * 100, 1)
+
     sig = calc_signal(df, z, flow_df)
     sup, res = find_sr(df)
 
