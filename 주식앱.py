@@ -26,41 +26,92 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* ── CSS 변수: 라이트/다크 자동 전환 ─────────────────────────────────────── */
+:root {
+    --card-bg:      #F8F8F8;
+    --card-bg2:     #F4F4F4;
+    --card-bg3:     #F6F6F6;
+    --card-border:  #E8E8E8;
+    --text-muted:   #888888;
+    --text-sub:     #999999;
+    --text-label:   #666666;
+    --divider:      #DDDDDD;
+    --summary-bg:   #F8F8F8;
+}
+[data-theme="dark"] {
+    --card-bg:      #262730;
+    --card-bg2:     #1E1E2E;
+    --card-bg3:     #2D2D3D;
+    --card-border:  #3A3A4A;
+    --text-muted:   #AAAAAA;
+    --text-sub:     #888888;
+    --text-label:   #BBBBBB;
+    --divider:      #444455;
+    --summary-bg:   #262730;
+}
+
 html, body, [class*="css"] {
     font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
 }
+
+/* ── 신호 박스 ────────────────────────────────────────────────────────────── */
 .signal-box {
     border-radius: 16px; padding: 22px 16px;
     text-align: center; margin: 8px 0 12px;
 }
 .signal-emoji  { font-size: 44px; line-height: 1.2; }
 .signal-label  { font-size: 24px; font-weight: 800; margin: 6px 0 3px; }
-.signal-score  { font-size: 13px; opacity: 0.7; }
+.signal-score  { font-size: 13px; opacity: 0.75; }
 .signal-desc   { font-size: 14px; margin-top: 8px; }
+
+/* ── 가격 바 ──────────────────────────────────────────────────────────────── */
 .price-bar {
     border-radius: 10px; padding: 11px 14px;
     margin: 6px 0 14px; font-size: 15px; font-weight: 600;
 }
+
+/* ── 분석 근거 ────────────────────────────────────────────────────────────── */
 .reason-box {
-    border-left: 4px solid #ddd; border-radius: 0 8px 8px 0;
+    border-left: 4px solid var(--divider);
+    border-radius: 0 8px 8px 0;
     padding: 7px 12px; margin: 4px 0;
-    font-size: 14px; background: #F6F6F6;
+    font-size: 14px;
+    background: var(--card-bg3);
+    color: inherit;
 }
+
+/* ── 매매 가격 카드 ───────────────────────────────────────────────────────── */
 .zone-card {
-    background: #F8F8F8; border-radius: 12px;
+    background: var(--card-bg); border-radius: 12px;
     padding: 14px 12px; text-align: center;
 }
-.zone-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+.zone-label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 .zone-value { font-size: 19px; font-weight: 800; }
-.zone-sub   { font-size: 12px; color: #999; margin-top: 2px; }
-.flow-card  {
+.zone-sub   { font-size: 12px; color: var(--text-sub);   margin-top: 2px; }
+
+/* ── 수급 카드 ────────────────────────────────────────────────────────────── */
+.flow-card {
     border-radius: 10px; padding: 12px;
     text-align: center; margin-bottom: 4px;
+    background: var(--card-bg);
 }
+
+/* ── 사이드바 미니 카드 ───────────────────────────────────────────────────── */
 .mini-card {
-    background: #F4F4F4; border-radius: 10px;
+    background: var(--card-bg2); border-radius: 10px;
     padding: 8px 10px; margin: 4px 0 2px;
 }
+
+/* ── 공통 카드 (포트폴리오·스크리너) ─────────────────────────────────────── */
+.app-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px; padding: 16px 20px; margin-bottom: 10px;
+}
+.app-label { font-size: 12px; color: var(--text-muted); }
+.app-sub   { font-size: 12px; color: var(--text-sub); }
+.app-muted { color: var(--text-muted); font-size: 13px; }
+
 @media (max-width: 640px) {
     .signal-label { font-size: 20px; }
     .signal-emoji { font-size: 36px; }
@@ -378,7 +429,7 @@ def render_sidebar():
 
         if not wl:
             st.markdown(
-                "<div style='color:#999;font-size:13px;padding:8px 0'>"
+                "<div style='color:var(--text-sub);font-size:13px;padding:8px 0'>"
                 "아직 추가된 종목이 없어요.<br>"
                 "분석 후 ☆ 버튼으로 추가하세요.</div>",
                 unsafe_allow_html=True,
@@ -730,8 +781,8 @@ def render_investor_flow(flow_df):
         amount = f"+{val/1e8:.0f}억" if val >= 0 else f"-{abs(val)/1e8:.0f}억"
         with cols[i]:
             st.markdown(
-                f"<div class='flow-card' style='background:#F8F8F8;border-top:3px solid {color}'>"
-                f"<div style='font-size:12px;color:#888'>{name} (5일)</div>"
+                f"<div class='flow-card' style='border-top:3px solid {color}'>"
+                f"<div style='font-size:12px;color:var(--text-muted)'>{name} (5일)</div>"
                 f"<div style='font-size:17px;font-weight:800;color:{color}'>{trend}</div>"
                 f"<div style='font-size:13px;color:{color}'>{amount}</div></div>",
                 unsafe_allow_html=True)
@@ -862,7 +913,7 @@ def render_ai_chat(code: str, name: str, z: dict, sig: dict):
         "분할 매수 전략을 알려주세요",
         "지금 고점인가요, 저점인가요?",
     ]
-    st.markdown("<div style='margin-bottom:6px;font-size:13px;color:#666'>💡 빠른 질문</div>",
+    st.markdown("<div style='margin-bottom:6px;font-size:13px;color:var(--text-label)'>💡 빠른 질문</div>",
                 unsafe_allow_html=True)
     cols = st.columns(2)
     for i, q in enumerate(quick):
@@ -919,7 +970,7 @@ def render_analysis(code, name, months):
     h_col, wl_col, kk_col = st.columns([4, 1, 1])
     with h_col:
         st.markdown(
-            f"### {name} <span style='color:#999;font-size:15px'>({code})</span><br>"
+            f"### {name} <span style='color:var(--text-sub);font-size:15px'>({code})</span><br>"
             f"<span style='font-size:30px;font-weight:900'>{int(z['last']):,}원</span>"
             f"&nbsp;<span style='font-size:16px;color:{chg_col}'>{arrow} {abs(z['day_chg']):.2f}%</span>",
             unsafe_allow_html=True)
@@ -1014,7 +1065,7 @@ def render_analysis(code, name, months):
     loss_p = round((z['buy_mid'] - z['stop'])  / z['buy_mid'] * 100, 1)
     gain_p = round((z['tgt1']   - z['buy_mid'])/ z['buy_mid'] * 100, 1)
     st.markdown(
-        f"<div style='margin:12px 0 4px;font-size:13px;color:#666'>"
+        f"<div style='margin:12px 0 4px;font-size:13px;color:var(--text-label)'>"
         f"리스크:리워드 = <b style='color:{rr_col}'>1:{rr} ({rr_txt})</b>"
         f"&nbsp;·&nbsp; 손절 시 <b>-{loss_p}%</b>&nbsp;·&nbsp; 목표 시 <b>+{gain_p}%</b></div>",
         unsafe_allow_html=True)
@@ -1158,13 +1209,12 @@ def render_portfolio_tab():
         pnl_pct_total = pnl_total / invested_total * 100
         p_col = '#C0392B' if pnl_total >= 0 else '#1A5FAC'
         st.markdown(
-            f"<div style='background:#F8F8F8;border-radius:14px;padding:16px 20px;"
-            f"margin-bottom:18px;display:flex;gap:32px;flex-wrap:wrap'>"
-            f"<div><div style='font-size:12px;color:#888'>💰 총 투자금액</div>"
+            f"<div class='app-card' style='display:flex;gap:32px;flex-wrap:wrap;margin-bottom:18px'>"
+            f"<div><div class='app-label'>💰 총 투자금액</div>"
             f"<div style='font-size:20px;font-weight:800'>{int(invested_total):,}원</div></div>"
-            f"<div><div style='font-size:12px;color:#888'>📈 총 평가금액</div>"
+            f"<div><div class='app-label'>📈 총 평가금액</div>"
             f"<div style='font-size:20px;font-weight:800'>{int(current_total):,}원</div></div>"
-            f"<div><div style='font-size:12px;color:#888'>💵 총 손익</div>"
+            f"<div><div class='app-label'>💵 총 손익</div>"
             f"<div style='font-size:20px;font-weight:800;color:{p_col}'>"
             f"{'+'if pnl_total>=0 else ''}{int(pnl_total):,}원 "
             f"({pnl_pct_total:+.2f}%)</div></div>"
@@ -1226,13 +1276,13 @@ def render_portfolio_tab():
                         f"<span style='color:{pc};font-weight:700;font-size:15px'>"
                         f"{arr} {abs(pnl_pct):.2f}%&nbsp;&nbsp;"
                         f"({'+'if pnl>=0 else ''}{int(pnl):,}원)</span><br>"
-                        f"<span style='color:#999;font-size:12px'>"
+                        f"<span class='app-sub'>"
                         f"매수 {int(invested):,}원 → 평가 {int(cur_val):,}원</span>"
                         f"</div>",
                         unsafe_allow_html=True)
                 else:
                     st.markdown(
-                        "<div style='padding-top:28px;color:#bbb;font-size:13px'>"
+                        "<div style='padding-top:28px;font-size:13px;color:var(--text-muted)'>"
                         "단가·수량 입력 시 수익률 표시</div>",
                         unsafe_allow_html=True)
             with ic4:
@@ -1455,7 +1505,7 @@ def render_screener_tab():
                 st.markdown(
                     f"<div style='font-size:15px;font-weight:800'>"
                     f"{i+1}위 {r['emoji']} {r['name']}</div>"
-                    f"<div style='font-size:12px;color:#888'>{r['sector']} · {r['code']}</div>",
+                    f"<div class='app-label'>{r['sector']} · {r['code']}</div>",
                     unsafe_allow_html=True)
                 st.markdown(
                     f"<span style='color:{pc};font-weight:700'>"
@@ -1464,15 +1514,15 @@ def render_screener_tab():
 
             with rc2:
                 st.markdown(
-                    f"<div style='font-size:12px;color:#888;margin-bottom:4px'>신호 점수</div>"
+                    f"<div class='app-label' style='margin-bottom:4px'>신호 점수</div>"
                     f"<div style='font-size:22px;font-weight:900;color:#1D9E75'>{r['score']}</div>"
-                    f"<div style='font-size:11px;color:#888'>{r['label']}</div>",
+                    f"<div class='app-label'>{r['label']}</div>",
                     unsafe_allow_html=True)
 
             with rc3:
-                rsi_c = '#1D9E75' if r['rsi'] and r['rsi'] < 40 else ('#E24B4A' if r['rsi'] and r['rsi'] > 65 else '#555')
+                rsi_c = '#1D9E75' if r['rsi'] and r['rsi'] < 40 else ('#E24B4A' if r['rsi'] and r['rsi'] > 65 else 'var(--text-label)')
                 st.markdown(
-                    f"<div style='font-size:12px;line-height:1.9'>"
+                    f"<div class='app-muted' style='line-height:1.9'>"
                     f"RSI: <b style='color:{rsi_c}'>{r['rsi']}</b> · "
                     f"52주: <b>{r['pos_pct']:.0f}%</b><br>"
                     f"매수가: <b>{r['buy_mid']:,}원</b><br>"
