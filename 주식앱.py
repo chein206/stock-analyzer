@@ -131,7 +131,10 @@ except Exception:
 # ── KIS Developers API 설정 ──────────────────────────────────────────────────
 KIS_APP_KEY    = st.secrets.get("kis_app_key",    "")
 KIS_APP_SECRET = st.secrets.get("kis_app_secret", "")
-KIS_BASE       = "https://openapi.koreainvestment.com:9443"   # 실전투자
+# 실전투자 / 모의투자 URL (kis_is_mock=true 로 모의투자 전환 가능)
+_KIS_REAL = "https://openapi.koreainvestment.com:9443"
+_KIS_MOCK = "https://openapivts.koreainvestment.com:29443"
+KIS_BASE   = _KIS_MOCK if st.secrets.get("kis_is_mock", False) else _KIS_REAL
 
 
 def kis_available() -> bool:
@@ -141,38 +144,56 @@ def kis_available() -> bool:
 
 def kis_get_token() -> str | None:
     """KIS OAuth2 액세스 토큰 발급 (세션당 24시간 캐시).
-    실패 시 1분 뒤 재시도 (무한 루프 방지).
+    실전투자 URL 우선 시도 → 실패 시 모의투자 URL 자동 재시도.
+    마지막 에러는 _kis_last_error 에 저장해 사이드바에 표시.
     """
     if not kis_available():
         return None
     cache = st.session_state.get('_kis_token_cache', {})
     if cache.get('expires_at', 0) > time.time() + 60:
-        return cache.get('token')          # 캐시 유효
-    try:
-        r = requests.post(
-            f"{KIS_BASE}/oauth2/tokenP",
-            json={
-                "grant_type": "client_credentials",
-                "appkey":     KIS_APP_KEY,
-                "appsecret":  KIS_APP_SECRET,
-            },
-            timeout=10,
-        )
-        if r.status_code == 200:
-            data       = r.json()
-            token      = data.get('access_token')
-            expires_in = int(data.get('expires_in', 86400))
-            if token:
+        return cache.get('token')   # 캐시 유효
+
+    # 실전 → 모의 순서로 시도 (이미 성공한 URL이 있으면 그것 먼저)
+    prev_base = st.session_state.get('_kis_base_url')
+    candidates = [prev_base] if prev_base else []
+    for url in [_KIS_REAL, _KIS_MOCK]:
+        if url not in candidates:
+            candidates.append(url)
+
+    last_err = ""
+    for base_url in candidates:
+        try:
+            r = requests.post(
+                f"{base_url}/oauth2/tokenP",
+                json={
+                    "grant_type": "client_credentials",
+                    "appkey":     KIS_APP_KEY,
+                    "appsecret":  KIS_APP_SECRET,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            data = r.json()
+            token = data.get('access_token')
+            if r.status_code == 200 and token:
+                expires_in = int(data.get('expires_in', 86400))
+                st.session_state['_kis_base_url']    = base_url   # 성공한 URL 저장
                 st.session_state['_kis_token_cache'] = {
                     'token':      token,
                     'expires_at': time.time() + expires_in,
                 }
+                st.session_state.pop('_kis_last_error', None)
                 return token
-    except Exception:
-        pass
-    # 발급 실패 → 60초 후 재시도
+            else:
+                msg = data.get('msg1') or data.get('message') or r.text[:120]
+                last_err = f"[{base_url.split(':')[1][2:]}] HTTP {r.status_code} — {msg}"
+        except Exception as e:
+            last_err = f"[연결 오류] {str(e)[:100]}"
+
+    # 모든 URL 실패
+    st.session_state['_kis_last_error']  = last_err
     st.session_state['_kis_token_cache'] = {
-        'token': None, 'expires_at': time.time() + 60
+        'token': None, 'expires_at': time.time() + 60   # 60초 후 재시도
     }
     return None
 
@@ -187,14 +208,14 @@ def _safe_float(val, default=None):
 
 
 @st.cache_data(ttl=30)
-def kis_price(code: str, _token: str) -> dict | None:
+def kis_price(code: str, _token: str, _base_url: str = _KIS_REAL) -> dict | None:
     """KIS 국내주식 현재가 조회 (30초 캐시).
-    _token 은 캐시 키에서 제외(underscore prefix) → 종목코드만으로 캐싱.
+    _token, _base_url 모두 캐시 키에서 제외(underscore prefix).
     반환: price, chg_pct, per, pbr, w52_high, w52_low, market_cap, source
     """
     try:
         r = requests.get(
-            f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
+            f"{_base_url}/uapi/domestic-stock/v1/quotations/inquire-price",
             headers={
                 "Authorization": f"Bearer {_token}",
                 "appkey":        KIS_APP_KEY,
@@ -532,7 +553,8 @@ def get_quick_price(code: str) -> dict | None:
     """현재가·등락률 반환 — KIS 실시간(30초) 우선, 실패 시 FDR/yfinance(5분) fallback."""
     token = kis_get_token()
     if token:
-        kp = kis_price(code, token)
+        base = st.session_state.get('_kis_base_url', _KIS_REAL)
+        kp = kis_price(code, token, base)
         if kp:
             return kp
     return _get_price_fdr(code)
@@ -619,15 +641,22 @@ def render_sidebar():
         if kis_available():
             _t = kis_get_token()
             if _t:
+                _used = st.session_state.get('_kis_base_url', '')
+                _env  = '모의투자' if 'vts' in _used else '실전투자'
                 st.markdown(
-                    "<div style='font-size:12px;padding:4px 0'>"
-                    "🟢 <b style='color:#1D9E75'>KIS 실시간</b> 연동 중</div>",
+                    f"<div style='font-size:12px;padding:4px 0'>"
+                    f"🟢 <b style='color:#1D9E75'>KIS 실시간</b> ({_env})</div>",
                     unsafe_allow_html=True)
             else:
                 st.markdown(
                     "<div style='font-size:12px;padding:4px 0'>"
-                    "🟡 <span style='color:#D4870E'>KIS 설정됨 (토큰 오류)</span></div>",
+                    "🟡 <span style='color:#D4870E'>KIS 토큰 오류</span></div>",
                     unsafe_allow_html=True)
+                _err = st.session_state.get('_kis_last_error', '')
+                if _err:
+                    with st.expander("🔍 오류 상세 보기"):
+                        st.code(_err, language=None)
+                        st.caption("위 내용을 캡처해서 공유해주세요")
         else:
             st.markdown(
                 "<div style='font-size:12px;padding:4px 0;color:var(--text-muted)'>"
@@ -1097,7 +1126,8 @@ def render_analysis(code, name, months):
         _kis_data = None
         _kis_token = kis_get_token()
         if _kis_token:
-            _kis_data = kis_price(code, _kis_token)
+            _kis_base = st.session_state.get('_kis_base_url', _KIS_REAL)
+            _kis_data = kis_price(code, _kis_token, _kis_base)
             if _kis_data:
                 # 더 정확한 KIS 지표로 덮어쓰기
                 if _kis_data.get('per'):
