@@ -128,6 +128,116 @@ except Exception:
     _ctrl = None
 
 
+# ── KIS Developers API 설정 ──────────────────────────────────────────────────
+KIS_APP_KEY    = st.secrets.get("kis_app_key",    "")
+KIS_APP_SECRET = st.secrets.get("kis_app_secret", "")
+KIS_BASE       = "https://openapi.koreainvestment.com:9443"   # 실전투자
+
+
+def kis_available() -> bool:
+    """KIS API 키가 Secrets에 설정돼 있으면 True"""
+    return bool(KIS_APP_KEY and KIS_APP_SECRET)
+
+
+def kis_get_token() -> str | None:
+    """KIS OAuth2 액세스 토큰 발급 (세션당 24시간 캐시).
+    실패 시 1분 뒤 재시도 (무한 루프 방지).
+    """
+    if not kis_available():
+        return None
+    cache = st.session_state.get('_kis_token_cache', {})
+    if cache.get('expires_at', 0) > time.time() + 60:
+        return cache.get('token')          # 캐시 유효
+    try:
+        r = requests.post(
+            f"{KIS_BASE}/oauth2/tokenP",
+            json={
+                "grant_type": "client_credentials",
+                "appkey":     KIS_APP_KEY,
+                "appsecret":  KIS_APP_SECRET,
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data       = r.json()
+            token      = data.get('access_token')
+            expires_in = int(data.get('expires_in', 86400))
+            if token:
+                st.session_state['_kis_token_cache'] = {
+                    'token':      token,
+                    'expires_at': time.time() + expires_in,
+                }
+                return token
+    except Exception:
+        pass
+    # 발급 실패 → 60초 후 재시도
+    st.session_state['_kis_token_cache'] = {
+        'token': None, 'expires_at': time.time() + 60
+    }
+    return None
+
+
+def _safe_float(val, default=None):
+    """문자열/숫자를 float로 안전 변환. 0이면 default 반환."""
+    try:
+        v = float(str(val).replace(',', '').strip())
+        return v if v != 0.0 else default
+    except Exception:
+        return default
+
+
+@st.cache_data(ttl=30)
+def kis_price(code: str, _token: str) -> dict | None:
+    """KIS 국내주식 현재가 조회 (30초 캐시).
+    _token 은 캐시 키에서 제외(underscore prefix) → 종목코드만으로 캐싱.
+    반환: price, chg_pct, per, pbr, w52_high, w52_low, market_cap, source
+    """
+    try:
+        r = requests.get(
+            f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
+            headers={
+                "Authorization": f"Bearer {_token}",
+                "appkey":        KIS_APP_KEY,
+                "appsecret":     KIS_APP_SECRET,
+                "tr_id":         "FHKST01010100",
+                "Content-Type":  "application/json; charset=utf-8",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD":         code,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        out = r.json().get('output', {})
+        if not out:
+            return None
+        price = _safe_float(out.get('stck_prpr'))
+        if not price:
+            return None
+        chg_pct = _safe_float(out.get('prdy_ctrt'), 0.0)   # 전일 대비율 (%)
+        # 52주 고저 — 필드명 두 가지 모두 시도
+        w52_h = (_safe_float(out.get('w52_hgpr'))
+                 or _safe_float(out.get('stck_dryy_hgpr')))
+        w52_l = (_safe_float(out.get('w52_lwpr'))
+                 or _safe_float(out.get('stck_dryy_lwpr')))
+        # 시가총액: hts_avls 는 억원 단위
+        mktcap_raw = _safe_float(out.get('hts_avls'))
+        return {
+            'price':      price,
+            'chg_pct':    chg_pct,
+            'per':        _safe_float(out.get('per')),
+            'pbr':        _safe_float(out.get('pbr')),
+            'w52_high':   w52_h,
+            'w52_low':    w52_l,
+            'market_cap': mktcap_raw * 1e8 if mktcap_raw else None,  # 억원 → 원
+            'source':     'KIS',
+        }
+    except Exception:
+        return None
+
+
 # ── 카카오 설정 ───────────────────────────────────────────────────────────────
 KAKAO_REST_KEY  = st.secrets.get("kakao_rest_key", "")
 REDIRECT_URI    = "https://stock-analyzer-egqwnt22pkfgzdgxuapppyw.streamlit.app"
@@ -385,15 +495,14 @@ def in_watchlist(code):
 
 
 # ── 사이드바 미니 신호판용 빠른 현재가 ───────────────────────────────────────
-@st.cache_data(ttl=300)   # 5분 캐시
-def get_quick_price(code: str) -> dict | None:
-    """현재가와 등락률 반환 (사이드바 미니 신호판용)"""
+@st.cache_data(ttl=300)
+def _get_price_fdr(code: str) -> dict | None:
+    """FDR / yfinance 지연가격 조회 (5분 캐시). KIS fallback 전용."""
     from datetime import datetime, timedelta
-    end = datetime.today()
+    end   = datetime.today()
     start = end - timedelta(days=7)
-    s, e = start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    s, e  = start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
 
-    # FinanceDataReader 우선
     try:
         import FinanceDataReader as fdr
         df = fdr.DataReader(code, s, e)
@@ -401,11 +510,10 @@ def get_quick_price(code: str) -> dict | None:
             df.columns = [c.capitalize() for c in df.columns]
             last = float(df['Close'].iloc[-1])
             prev = float(df['Close'].iloc[-2])
-            return {'price': last, 'chg_pct': (last / prev - 1) * 100}
+            return {'price': last, 'chg_pct': (last / prev - 1) * 100, 'source': 'FDR'}
     except Exception:
         pass
 
-    # yfinance fallback
     try:
         import yfinance as yf
         for suffix in ['.KS', '.KQ']:
@@ -413,11 +521,21 @@ def get_quick_price(code: str) -> dict | None:
             if hist is not None and not hist.empty and len(hist) >= 2:
                 last = float(hist['Close'].iloc[-1])
                 prev = float(hist['Close'].iloc[-2])
-                return {'price': last, 'chg_pct': (last / prev - 1) * 100}
+                return {'price': last, 'chg_pct': (last / prev - 1) * 100, 'source': 'YF'}
     except Exception:
         pass
 
     return None
+
+
+def get_quick_price(code: str) -> dict | None:
+    """현재가·등락률 반환 — KIS 실시간(30초) 우선, 실패 시 FDR/yfinance(5분) fallback."""
+    token = kis_get_token()
+    if token:
+        kp = kis_price(code, token)
+        if kp:
+            return kp
+    return _get_price_fdr(code)
 
 
 # ── 사이드바 ──────────────────────────────────────────────────────────────────
@@ -496,7 +614,26 @@ def render_sidebar():
             else:
                 st.warning("Secrets에 kakao_rest_key를\n설정해주세요")
 
+        # ── KIS API 연결 상태 ─────────────────────────────────────
         st.divider()
+        if kis_available():
+            _t = kis_get_token()
+            if _t:
+                st.markdown(
+                    "<div style='font-size:12px;padding:4px 0'>"
+                    "🟢 <b style='color:#1D9E75'>KIS 실시간</b> 연동 중</div>",
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    "<div style='font-size:12px;padding:4px 0'>"
+                    "🟡 <span style='color:#D4870E'>KIS 설정됨 (토큰 오류)</span></div>",
+                    unsafe_allow_html=True)
+        else:
+            st.markdown(
+                "<div style='font-size:12px;padding:4px 0;color:var(--text-muted)'>"
+                "⚪ 지연 데이터 (KIS 미연동)</div>",
+                unsafe_allow_html=True)
+
         st.caption("💡 사이드바가 안 보이면\n화면 왼쪽 **>** 버튼을 누르세요")
 
 
@@ -956,6 +1093,24 @@ def render_analysis(code, name, months):
         flow_df  = get_investor_flow(code)
         earnings = get_quarterly_earnings(code)
 
+        # ── KIS 실시간 데이터로 info 보강 ────────────────────────────
+        _kis_data = None
+        _kis_token = kis_get_token()
+        if _kis_token:
+            _kis_data = kis_price(code, _kis_token)
+            if _kis_data:
+                # 더 정확한 KIS 지표로 덮어쓰기
+                if _kis_data.get('per'):
+                    info['per']      = _kis_data['per']
+                if _kis_data.get('pbr'):
+                    info['pbr']      = _kis_data['pbr']
+                if _kis_data.get('w52_high'):
+                    info['52w_high'] = _kis_data['w52_high']
+                if _kis_data.get('w52_low'):
+                    info['52w_low']  = _kis_data['w52_low']
+                if _kis_data.get('market_cap') and not info.get('market_cap'):
+                    info['market_cap'] = _kis_data['market_cap']
+
     if df_raw is None or df_raw.empty:
         st.error("데이터를 가져올 수 없습니다. 종목코드를 다시 확인해주세요."); return
 
@@ -967,10 +1122,25 @@ def render_analysis(code, name, months):
     # 종목 헤더 + 버튼들
     chg_col = '#E24B4A' if z['day_chg'] >= 0 else '#185FA5'
     arrow   = '▲' if z['day_chg'] >= 0 else '▼'
+
+    # 실시간 / 지연 뱃지
+    if _kis_data:
+        data_badge = (
+            "<span style='font-size:11px;background:#E8F8F2;color:#1D9E75;"
+            "border-radius:4px;padding:2px 7px;margin-left:8px;font-weight:700'>"
+            "🟢 실시간</span>"
+        )
+    else:
+        data_badge = (
+            "<span style='font-size:11px;background:var(--card-bg2);color:var(--text-muted);"
+            "border-radius:4px;padding:2px 7px;margin-left:8px;'>⏱ 지연</span>"
+        )
+
     h_col, wl_col, kk_col = st.columns([4, 1, 1])
     with h_col:
         st.markdown(
-            f"### {name} <span style='color:var(--text-sub);font-size:15px'>({code})</span><br>"
+            f"### {name} <span style='color:var(--text-sub);font-size:15px'>({code})</span>"
+            f"{data_badge}<br>"
             f"<span style='font-size:30px;font-weight:900'>{int(z['last']):,}원</span>"
             f"&nbsp;<span style='font-size:16px;color:{chg_col}'>{arrow} {abs(z['day_chg']):.2f}%</span>",
             unsafe_allow_html=True)
