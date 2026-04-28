@@ -419,55 +419,170 @@ def format_kakao_message(code: str, name: str, z: dict, sig: dict) -> str:
     )
 
 
-# ── 종목명 사전 ───────────────────────────────────────────────────────────────
+# ── 종목명 사전 (오프라인 fallback — 외부 API 전부 실패 시 사용) ──────────────
 KNOWN_NAMES = {
-    '005930': '삼성전자',    '000660': 'SK하이닉스',
-    '035420': 'NAVER',       '035720': '카카오',
-    '005380': '현대차',      '000270': '기아',
-    '051910': 'LG화학',      '006400': '삼성SDI',
-    '207940': '삼성바이오로직스', '068270': '셀트리온',
-    '028260': '삼성물산',    '105560': 'KB금융',
-    '055550': '신한지주',    '086790': '하나금융지주',
-    '003550': 'LG',          '066570': 'LG전자',
-    '096770': 'SK이노베이션','017670': 'SK텔레콤',
-    '030200': 'KT',          '032830': '삼성생명',
-    '373220': 'LG에너지솔루션','247540': '에코프로비엠',
-    '086520': '에코프로',    '011200': 'HMM',
-    '010140': '삼성중공업',  '042660': '한화오션',
-    '329180': 'HD현대중공업','012330': '현대모비스',
-    '000810': '삼성화재',    '090430': '아모레퍼시픽',
-    '034730': 'SK',          '005490': 'POSCO홀딩스',
-    '003490': '대한항공',    '000100': '유한양행',
-    '128940': '한미약품',    '196170': '알테오젠',
-    '145020': '휴젤',        '015760': '한국전력',
+    # 대형주
+    '005930': '삼성전자',        '000660': 'SK하이닉스',
+    '035420': 'NAVER',           '035720': '카카오',
+    '005380': '현대차',          '000270': '기아',
+    '051910': 'LG화학',          '006400': '삼성SDI',
+    '207940': '삼성바이오로직스','068270': '셀트리온',
+    '028260': '삼성물산',        '105560': 'KB금융',
+    '055550': '신한지주',        '086790': '하나금융지주',
+    '003550': 'LG',              '066570': 'LG전자',
+    '096770': 'SK이노베이션',    '017670': 'SK텔레콤',
+    '030200': 'KT',              '032830': '삼성생명',
+    '373220': 'LG에너지솔루션',  '247540': '에코프로비엠',
+    '086520': '에코프로',        '011200': 'HMM',
+    '010140': '삼성중공업',      '042660': '한화오션',
+    '329180': 'HD현대중공업',    '012330': '현대모비스',
+    '000810': '삼성화재',        '090430': '아모레퍼시픽',
+    '034730': 'SK',              '005490': 'POSCO홀딩스',
+    '003490': '대한항공',        '000100': '유한양행',
+    '128940': '한미약품',        '196170': '알테오젠',
+    '145020': '휴젤',            '015760': '한국전력',
+    # 반도체·장비
+    '042700': '한미반도체',      '357780': '솔브레인',
+    '240810': '원익IPS',         '285130': 'SK실트론',
+    '336370': '솔브레인홀딩스',  '079550': 'LIG넥스원',
+    '058470': '리노공업',        '036830': '솔브레인',
+    # 2차전지
+    '278280': '천보',            '064760': '티씨케이',
+    '006280': '녹십자',          '298040': '효성첨단소재',
+    # 바이오·제약
+    '326030': 'SK바이오팜',      '000100': '유한양행',
+    '091990': '셀트리온헬스케어','302440': 'SK바이오사이언스',
+    '185750': '종근당',          '000520': '삼일제약',
+    '214370': '케어젠',          '111770': '영원무역',
+    # 자동차·부품
+    '011210': '현대위아',        '204320': '현대트랜시스',
+    '060980': '한라홀딩스',      '009540': 'HD한국조선해양',
+    # 조선·방산
+    '012450': '한화에어로스페이스','047810': '한국항공우주',
+    '064350': '현대로템',        '272210': '한화시스템',
+    # IT·게임
+    '259960': '크래프톤',        '036570': 'NC소프트',
+    '251270': '넷마블',          '263750': '펄어비스',
+    '293490': '카카오게임즈',    '035960': 'DRB동일',
+    '041510': 'SM엔터테인먼트',  '035900': 'JYP Ent.',
+    '122870': 'YG엔터테인먼트',  '352820': '하이브',
+    # 금융
+    '316140': '우리금융지주',    '138930': 'BNK금융지주',
+    '175330': 'JB금융지주',      '024110': '기업은행',
+    '005940': 'NH투자증권',      '006800': '미래에셋증권',
+    '039490': '키움증권',        '071050': '한국금융지주',
+    # 전기전자·디스플레이
+    '034220': 'LG디스플레이',    '009150': '삼성전기',
+    '000990': 'DB하이텍',        '023590': '다우기술',
+    # 철강·소재
+    '004020': '현대제철',        '010060': 'OCI',
+    '001440': '태한화학공업',    '002380': 'KCC',
+    # 통신
+    '032640': 'LG유플러스',
+    # 유통·소비
+    '139480': '이마트',          '004170': '신세계',
+    '000720': '현대건설',        '028050': '삼성엔지니어링',
+    '006360': 'GS건설',          '047040': '대우건설',
+    '000240': '한국타이어앤테크놀로지',
+    '271560': '오리온',          '097950': 'CJ제일제당',
+    '003230': '삼양식품',        '007070': 'GS리테일',
+    # 에너지
+    '078930': 'GS',              '010950': 'S-Oil',
+    # 항공·물류
+    '020560': '아시아나항공',
+    # 지주·기타
+    '000150': '두산',            '004000': '롯데케미칼',
+    '011070': 'LG이노텍',        '036460': '한국가스공사',
 }
 
 # ── KRX 전체 종목 ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def load_krx_stocks():
-    try:
-        import FinanceDataReader as fdr
-        df = fdr.StockListing('KRX')
+    def _normalize(df):
+        """컬럼명 → Code/Name 으로 통일. 실패 시 None 반환."""
         col_map = {}
         for c in df.columns:
-            cl = c.lower().strip()
-            if cl in ('code', 'symbol', '종목코드', '단축코드'): col_map[c] = 'Code'
-            elif cl in ('name', '종목명', '회사명'):             col_map[c] = 'Name'
+            cl = (c.lower().strip()
+                  .replace(' ', '').replace('_', '').replace('-', ''))
+            if cl in ('code', 'symbol', '종목코드', '단축코드',
+                      'ticker', 'isin', 'shortcode'):
+                col_map[c] = 'Code'
+            elif cl in ('name', '종목명', '회사명', 'corpname',
+                        'shortname', 'company', '기업명', '단축명'):
+                col_map[c] = 'Name'
         df = df.rename(columns=col_map)
         if 'Code' not in df.columns or 'Name' not in df.columns:
-            raise ValueError
+            return None
         df = df[['Code', 'Name']].copy()
-        df['Code'] = df['Code'].astype(str).str.zfill(6)
-        return df[df['Code'].str.match(r'^\d{6}$')].drop_duplicates('Code').reset_index(drop=True)
+        df['Code'] = df['Code'].astype(str).str.extract(r'(\d{6})')[0]
+        df = df.dropna(subset=['Code'])
+        return df.drop_duplicates('Code').reset_index(drop=True)
+
+    # 1순위: FDR KRX 전체
+    try:
+        import FinanceDataReader as fdr
+        result = _normalize(fdr.StockListing('KRX'))
+        if result is not None and len(result) > 200:
+            return result
     except Exception:
-        return pd.DataFrame(list(KNOWN_NAMES.items()), columns=['Code', 'Name'])
+        pass
+
+    # 2순위: FDR KOSPI + KOSDAQ 분리 요청
+    try:
+        import FinanceDataReader as fdr
+        parts = []
+        for market in ('KOSPI', 'KOSDAQ'):
+            try:
+                r = _normalize(fdr.StockListing(market))
+                if r is not None and not r.empty:
+                    parts.append(r)
+            except Exception:
+                pass
+        if parts:
+            combined = pd.concat(parts, ignore_index=True).drop_duplicates('Code')
+            if len(combined) > 200:
+                return combined.reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 3순위: pykrx — 티커 목록(빠름) + 이름 조회
+    try:
+        from pykrx import stock as pstock
+        from datetime import datetime, timedelta
+        tickers = []
+        for back in range(5):   # 최근 5거래일 중 데이터 있는 날 탐색
+            d = (datetime.today() - timedelta(days=back)).strftime('%Y%m%d')
+            try:
+                t = (pstock.get_market_ticker_list(d, market='KOSPI') +
+                     pstock.get_market_ticker_list(d, market='KOSDAQ'))
+                if t:
+                    tickers = t
+                    break
+            except Exception:
+                pass
+        if tickers:
+            rows = []
+            for t in tickers:
+                try:
+                    rows.append({'Code': t.zfill(6),
+                                 'Name': pstock.get_market_ticker_name(t)})
+                except Exception:
+                    pass
+            if len(rows) > 200:
+                return pd.DataFrame(rows).drop_duplicates('Code').reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 최종 fallback: 하드코딩 목록
+    return pd.DataFrame(list(KNOWN_NAMES.items()), columns=['Code', 'Name'])
 
 
 def search_stocks(krx, query):
     q = query.strip()
     if not q:
         return pd.DataFrame(columns=['Code', 'Name'])
-    mask = krx['Name'].str.contains(q, na=False, case=False) | krx['Code'].str.contains(q, na=False)
+    mask = (krx['Name'].str.contains(q, na=False, case=False, regex=False) |
+            krx['Code'].str.contains(q, na=False, regex=False))
     return krx[mask].head(12)
 
 
