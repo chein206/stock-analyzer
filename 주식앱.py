@@ -829,15 +829,69 @@ def get_stock_info(code):
 
 @st.cache_data(ttl=3600)
 def get_investor_flow(code, days=20):
+    """기관/외국인 수급 데이터 — pykrx 우선, 실패 시 KIS fallback."""
     from datetime import datetime, timedelta
+
+    # 1순위: pykrx (20일 히스토리)
     try:
         from pykrx import stock as pstock
-        end = datetime.today(); start = end - timedelta(days=days * 2 + 10)
+        end   = datetime.today()
+        # 주말·공휴일 여유분을 넉넉히 (days × 3)
+        start = end - timedelta(days=days * 3)
         df = pstock.get_market_trading_value_by_date(
             start.strftime('%Y%m%d'), end.strftime('%Y%m%d'), code)
-        if df is None or df.empty: return None
-        return df.tail(days)
-    except Exception: return None
+        if df is not None and not df.empty:
+            # 거래 없는 날(합계=0) 제거
+            df = df[df.abs().sum(axis=1) > 0]
+            if len(df) >= 2:
+                return df.tail(days)
+    except Exception:
+        pass
+
+    # 2순위: KIS API — 오늘 하루 투자자별 데이터만이라도 반환
+    try:
+        token = kis_get_token()
+        if not token:
+            return None
+        base = st.session_state.get('_kis_base_url', _KIS_REAL)
+        r = requests.get(
+            f"{base}/uapi/domestic-stock/v1/quotations/inquire-investor",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "appkey":       KIS_APP_KEY,
+                "appsecret":    KIS_APP_SECRET,
+                "tr_id":        "FHKST01010900",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD":         code,
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            out = r.json().get('output', [])
+            if out:
+                rows = []
+                for item in out[:days]:
+                    try:
+                        date_str = item.get('stck_bsop_date', '')
+                        date = pd.to_datetime(date_str, format='%Y%m%d')
+                        rows.append({
+                            'date':    date,
+                            '외국인':  float(item.get('frgn_ntby_qty', 0)) * 1000,
+                            '기관합계': float(item.get('orgn_ntby_qty', 0)) * 1000,
+                            '개인':    float(item.get('indv_ntby_qty', 0)) * 1000,
+                        })
+                    except Exception:
+                        pass
+                if rows:
+                    df = pd.DataFrame(rows).set_index('date').sort_index()
+                    return df
+    except Exception:
+        pass
+
+    return None
 
 
 @st.cache_data(ttl=86400)
@@ -1047,12 +1101,21 @@ def build_chart(df, z):
 def render_investor_flow(flow_df):
     import plotly.graph_objects as go
     if flow_df is None or flow_df.empty:
-        st.caption("수급 데이터를 가져올 수 없습니다."); return
+        st.markdown(
+            "<div style='padding:16px;background:var(--card-bg);border-radius:10px;"
+            "color:var(--text-muted);font-size:13px;text-align:center'>"
+            "📡 수급 데이터를 가져올 수 없어요.<br>"
+            "<span style='font-size:12px'>KRX 서버 응답이 없거나 거래일이 아닌 경우입니다.</span>"
+            "</div>",
+            unsafe_allow_html=True)
+        return
+    # 컬럼 탐지 — '합계' 없어도 '기관' 이름이 있으면 허용
     foreign_col = next((c for c in flow_df.columns if '외국인' in c), None)
-    inst_col    = next((c for c in flow_df.columns if '기관' in c and '합계' in c), None)
+    inst_col    = next((c for c in flow_df.columns
+                        if '기관' in c and ('합계' in c or c == '기관')), None)
     indiv_col   = next((c for c in flow_df.columns if '개인' in c), None)
     if not foreign_col and not inst_col:
-        st.caption("수급 컬럼을 찾을 수 없습니다."); return
+        st.caption(f"수급 컬럼을 인식할 수 없습니다. (컬럼: {list(flow_df.columns)})"); return
     r5 = flow_df.tail(5)
     cards = [(n, c) for n, c in [('외국인', foreign_col), ('기관', inst_col), ('개인', indiv_col)] if c]
     cols = st.columns(len(cards))
