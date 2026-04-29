@@ -70,7 +70,7 @@ html, body, [class*="css"] {
 .signal-emoji  { font-size: 44px; line-height: 1.2; }
 .signal-label  { font-size: 24px; font-weight: 800; margin: 6px 0 3px; }
 .signal-score  { font-size: 13px; opacity: 0.75; }
-.signal-desc   { font-size: 14px; margin-top: 8px; }
+.signal-desc   { font-size: 14px; margin-top: 8px; word-break: keep-all; line-height: 1.7; }
 
 /* ── 가격 바 ──────────────────────────────────────────────────────────────── */
 .price-bar {
@@ -86,12 +86,14 @@ html, body, [class*="css"] {
     font-size: 14px;
     background: var(--card-bg3);
     color: inherit;
+    word-break: keep-all; line-height: 1.6;
 }
 
 /* ── 매매 가격 카드 ───────────────────────────────────────────────────────── */
 .zone-card {
     background: var(--card-bg); border-radius: 12px;
     padding: 14px 12px; text-align: center;
+    word-break: keep-all;
 }
 .zone-label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 .zone-value { font-size: 19px; font-weight: 800; }
@@ -824,9 +826,64 @@ def get_quick_price(code: str) -> dict | None:
     return _get_price_fdr(code)
 
 
+# ── 가격 알림 ────────────────────────────────────────────────────────────────
+def _check_price_alerts():
+    """관심종목 알림 가격 도달 여부 체크 — 30초마다 호출."""
+    alerts = st.session_state.get('price_alerts', {})
+    if not alerts:
+        return
+    tok = get_valid_kakao_token()
+    for code, cfg in alerts.items():
+        target = cfg.get('target')
+        stop   = cfg.get('stop')
+        if not target and not stop:
+            continue
+        pinfo = get_quick_price(code)
+        if not pinfo:
+            continue
+        price = pinfo.get('price', 0)
+        name  = cfg.get('name', code)
+        triggered = cfg.get('last_triggered', '')
+
+        if target and price >= target and triggered != f'target_{target}':
+            msg = (f"🔔 [{name}] 목표가 도달!\n"
+                   f"현재가 {price:,}원 ≥ 목표가 {int(target):,}원")
+            st.toast(msg, icon="🎯")
+            if tok:
+                try:
+                    send_kakao_message(tok, msg)
+                except Exception:
+                    pass
+            alerts[code]['last_triggered'] = f'target_{target}'
+
+        elif stop and price <= stop and triggered != f'stop_{stop}':
+            msg = (f"🚨 [{name}] 손절가 도달!\n"
+                   f"현재가 {price:,}원 ≤ 손절가 {int(stop):,}원")
+            st.toast(msg, icon="🚨")
+            if tok:
+                try:
+                    send_kakao_message(tok, msg)
+                except Exception:
+                    pass
+            alerts[code]['last_triggered'] = f'stop_{stop}'
+
+        elif target and stop:
+            # 가격이 두 경계 사이로 회복되면 트리거 리셋
+            if stop < price < target:
+                alerts[code]['last_triggered'] = ''
+
+    st.session_state['price_alerts'] = alerts
+
+
 # ── 사이드바 ──────────────────────────────────────────────────────────────────
 def render_sidebar():
     with st.sidebar:
+        # ── 30초마다 가격 알림 체크 ───────────────────────────
+        _now = time.time()
+        if _now - st.session_state.get('_alert_last_check', 0) > 30:
+            st.session_state['_alert_last_check'] = _now
+            _check_price_alerts()
+
         # ── 미니 신호판 ──────────────────────────────────────
         st.markdown("## ⭐ 관심종목")
         wl = st.session_state.get('watchlist', [])
@@ -839,6 +896,9 @@ def render_sidebar():
                 unsafe_allow_html=True,
             )
         else:
+            if 'price_alerts' not in st.session_state:
+                st.session_state['price_alerts'] = {}
+
             for item in wl:
                 code = item['code']
                 name = item['name']
@@ -853,6 +913,7 @@ def render_sidebar():
                     p_color = '#C0392B' if up else '#1A5FAC'   # 한국식: 상승=빨강, 하락=파랑
                     price_str = f"{int(price):,}원 {arrow}{abs(chg):.2f}%"
                 else:
+                    price   = 0
                     dot       = '⚪'
                     p_color   = '#888'
                     price_str = '데이터 없음'
@@ -875,6 +936,30 @@ def render_sidebar():
                     if st.button("✕", key=f"wl_del_{code}"):
                         remove_from_watchlist(code)
                         st.rerun()
+
+                # ── 🔔 알림 설정 (종목별) ─────────────────────
+                _al = st.session_state['price_alerts'].get(code, {})
+                with st.expander(f"🔔 알림 설정", expanded=False):
+                    _default_tgt = float(_al.get('target') or (price * 1.10 if price else 0))
+                    _default_stp = float(_al.get('stop')   or (price * 0.93 if price else 0))
+                    _tgt = st.number_input(
+                        "목표가 (원)", min_value=0, value=int(_default_tgt),
+                        step=100, key=f"al_tgt_{code}")
+                    _stp = st.number_input(
+                        "손절가 (원)", min_value=0, value=int(_default_stp),
+                        step=100, key=f"al_stp_{code}")
+                    if st.button("💾 저장", key=f"al_save_{code}", use_container_width=True):
+                        st.session_state['price_alerts'][code] = {
+                            'target': float(_tgt) if _tgt > 0 else None,
+                            'stop':   float(_stp) if _stp > 0 else None,
+                            'name':   name,
+                            'last_triggered': '',
+                        }
+                        st.toast(f"✅ {name} 알림 저장됨", icon="🔔")
+                    if _al:
+                        tgt_disp = f"{int(_al['target']):,}원" if _al.get('target') else '-'
+                        stp_disp = f"{int(_al['stop']):,}원"   if _al.get('stop')   else '-'
+                        st.caption(f"현재 설정: 목표 {tgt_disp} / 손절 {stp_disp}")
 
         # ── 카카오톡 연결 ─────────────────────────────────────
         st.divider()
@@ -1094,9 +1179,45 @@ def get_stock_info(code):
                     'roe': raw.get('returnOnEquity'), 'market_cap': raw.get('marketCap'),
                     'dividend': raw.get('dividendYield'), 'sector': raw.get('sector','-'),
                     '52w_high': raw.get('fiftyTwoWeekHigh'), '52w_low': raw.get('fiftyTwoWeekLow'),
+                    'eps': raw.get('trailingEps'),
+                    'dividend_rate': raw.get('dividendRate'),
+                    'ex_dividend_date': raw.get('exDividendDate'),
                 }
         except Exception: pass
     return {}
+
+
+@st.cache_data(ttl=600)
+def get_stock_news(name: str) -> list:
+    """Google News RSS로 종목 관련 뉴스 5건 반환 (제목·링크·발행시간)."""
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+    try:
+        rss_url = (f"https://news.google.com/rss/search?"
+                   f"q={urllib.parse.quote(name)}&hl=ko&gl=KR&ceid=KR:ko")
+        r = requests.get(rss_url, timeout=8,
+                         headers={'User-Agent': 'Mozilla/5.0'})
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        items = root.findall('.//item')[:5]
+        news = []
+        for it in items:
+            title   = (it.findtext('title') or '').strip()
+            link    = (it.findtext('link')  or '').strip()
+            pub     = (it.findtext('pubDate') or '').strip()
+            desc    = (it.findtext('description') or '').strip()
+            # pubDate 파싱
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(pub)
+                pub_fmt = dt.strftime('%m/%d %H:%M')
+            except Exception:
+                pub_fmt = pub[:16]
+            news.append({'title': title, 'link': link,
+                         'pub': pub_fmt, 'desc': desc})
+        return news
+    except Exception:
+        return []
 
 
 @st.cache_data(ttl=3600)
@@ -2038,6 +2159,44 @@ def render_ai_chat(code: str, name: str, z: dict, sig: dict):
             st.rerun()
 
 
+def render_news_tab(name: str, code: str, z: dict, sig: dict):
+    """뉴스 탭 — Google News RSS 5건 + AI 요약 버튼."""
+    with st.spinner("뉴스 가져오는 중..."):
+        news = get_stock_news(name)
+
+    if not news:
+        st.info("뉴스를 가져올 수 없습니다. 잠시 후 다시 시도해주세요.")
+        return
+
+    for i, n in enumerate(news):
+        title = n['title']
+        link  = n['link']
+        pub   = n['pub']
+        st.markdown(
+            f"<div style='background:var(--card-bg);border-radius:10px;"
+            f"padding:10px 14px;margin-bottom:8px;border:1px solid var(--card-border)'>"
+            f"<div style='font-size:14px;font-weight:700;word-break:keep-all;line-height:1.5'>"
+            f"<a href='{link}' target='_blank' style='text-decoration:none;color:inherit'>{title}</a>"
+            f"</div>"
+            f"<div style='font-size:12px;color:var(--text-muted);margin-top:4px'>{pub}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+    if st.button("🤖 AI 뉴스 요약", key=f"news_ai_{code}", use_container_width=True):
+        headlines = "\n".join(
+            f"{i+1}. {n['title']}" for i, n in enumerate(news))
+        summary_prompt = (
+            f"다음은 '{name}' 관련 최신 뉴스 헤드라인입니다:\n{headlines}\n\n"
+            f"위 뉴스를 3줄로 요약하고, 주가에 미칠 영향을 짧게 평가해주세요. "
+            f"한국어로, 간결하게 답변하세요.")
+        with st.spinner("AI가 뉴스를 분석 중..."):
+            summary = ask_ai_advisor(
+                summary_prompt, code, name, z, sig, [])
+        st.markdown(f"**📰 AI 뉴스 요약**\n\n{summary}")
+
+
 # ── 분석 결과 ─────────────────────────────────────────────────────────────────
 def render_analysis(code, name, months):
     with st.spinner(f'{name} 데이터 수집 중...'):
@@ -2247,9 +2406,6 @@ def render_analysis(code, name, months):
                 f"<div class='reason-box' style='border-left-color:{border}'>{icon_} {text}</div>",
                 unsafe_allow_html=True)
 
-    st.markdown("#### 💰 기관/외국인 수급 현황 (최근 20일)")
-    render_investor_flow(flow_df)
-
     st.markdown("#### 📉 52주 가격 위치")
     lc, rc = st.columns(2)
     lc.caption(f"52주 저가: {int(z['w52_low']):,}원")
@@ -2271,48 +2427,106 @@ def render_analysis(code, name, months):
                 for v in res:
                     st.markdown(f"- `{int(v):,}원` (+{round((v-z['last'])/z['last']*100,1):.1f}%)")
 
-    st.markdown("#### 📈 주가 차트")
-    st.plotly_chart(build_chart(df, z), use_container_width=True)
+    # ── 재무 지표 & 배당 요약 행 ─────────────────────────────────────────────
+    _per = info.get('per'); _pbr = info.get('pbr'); _roe = info.get('roe')
+    _div = info.get('dividend'); _div_rate = info.get('dividend_rate')
+    _ex_date = info.get('ex_dividend_date')
+    _cap = info.get('market_cap'); _eps = info.get('eps')
 
-    with st.expander("🔍 상세 기술 분석"):
-        rsi_v = z['rsi']; ma5_v = df['MA5'].iloc[-1]
-        ma20_v = df['MA20'].iloc[-1]; ma60_v = df['MA60'].iloc[-1]
-        macd_v = df['MACD'].iloc[-1]; macd_s = df['MACD_signal'].iloc[-1]
-        ec1, ec2 = st.columns(2)
-        with ec1:
-            if rsi_v:
-                rsi_lbl = '과매도 ↗' if rsi_v < 30 else ('과매수 ↘' if rsi_v > 70 else '중립')
-                st.metric("RSI (14일)", f"{rsi_v:.1f}", rsi_lbl)
-            st.metric("MACD", "골든크로스 (매수)" if macd_v > macd_s else "데드크로스 (매도)")
-        with ec2:
-            trend = ('정배열 — 상승 추세' if ma5_v > ma20_v > ma60_v
-                     else '역배열 — 하락 추세' if ma5_v < ma20_v < ma60_v else '혼조')
-            st.metric("이동평균 배열", trend)
-            st.metric("MA20 / MA60", f"{int(ma20_v):,} / {int(ma60_v):,}원")
+    _has_metrics = any([_per, _pbr, _roe, _cap])
+    _has_div = any([_div, _div_rate])
 
-    with st.expander("📊 분기 실적 추이 (최근 4분기)"):
-        render_quarterly_earnings(earnings)
+    if _has_metrics or _has_div:
+        with st.expander("🏢 기업 기본 정보 · 재무 지표 · 배당", expanded=False):
+            # 재무 지표 색상 코딩
+            if _has_metrics:
+                st.markdown("**📊 재무 지표**")
+                _fm_cols = st.columns(4)
+                with _fm_cols[0]:
+                    if _cap:
+                        st.metric("시가총액",
+                                  f"{_cap/1e12:.1f}조" if _cap>=1e12 else f"{_cap/1e8:.0f}억")
+                with _fm_cols[1]:
+                    if _per:
+                        _per_col = ('#1D9E75' if _per < 10
+                                    else '#D4870E' if _per < 20 else '#E24B4A')
+                        _per_delta = ('저평가' if _per < 10
+                                      else '적정' if _per < 20 else '고평가')
+                        st.metric("PER", f"{_per:.1f}배", _per_delta,
+                                  delta_color="normal" if _per < 20 else "inverse")
+                with _fm_cols[2]:
+                    if _pbr:
+                        _pbr_delta = '저평가' if _pbr < 1 else ('적정' if _pbr < 2 else '고평가')
+                        st.metric("PBR", f"{_pbr:.2f}배", _pbr_delta,
+                                  delta_color="normal" if _pbr < 2 else "inverse")
+                with _fm_cols[3]:
+                    if _roe:
+                        _roe_pct = _roe * 100
+                        _roe_delta = '우수' if _roe_pct >= 15 else ('양호' if _roe_pct >= 8 else '저조')
+                        st.metric("ROE", f"{_roe_pct:.1f}%", _roe_delta)
+                if _eps:
+                    st.caption(f"EPS (주당순이익): {int(_eps):,}원")
+                if info.get('sector') and info['sector'] != '-':
+                    st.caption(f"섹터: {info['sector']}")
 
-    if _QE:
-        with st.expander("🔬 Walk-Forward 백테스트 (과거 성과 시뮬레이션)"):
-            _render_backtest(code, months)
+            # 배당 정보
+            if _has_div:
+                st.markdown("**💰 배당 정보**")
+                _div_cols = st.columns(3)
+                with _div_cols[0]:
+                    if _div:
+                        st.metric("배당수익률", f"{_div*100:.2f}%")
+                with _div_cols[1]:
+                    if _div_rate:
+                        st.metric("연간 배당금", f"{_div_rate:,.0f}원")
+                with _div_cols[2]:
+                    if _ex_date:
+                        try:
+                            import datetime as _dt
+                            _ex_dt = _dt.datetime.fromtimestamp(_ex_date)
+                            st.metric("배당락일", _ex_dt.strftime('%Y-%m-%d'))
+                        except Exception:
+                            pass
 
-    if any([info.get('per'), info.get('pbr'), info.get('market_cap')]):
-        with st.expander("🏢 기업 기본 정보"):
-            ic1, ic2 = st.columns(2)
-            cap = info.get('market_cap')
-            with ic1:
-                if cap: st.metric("시가총액", f"{cap/1e12:.1f}조원" if cap>=1e12 else f"{cap/1e8:.0f}억원")
-                if info.get('per'): st.metric("PER", f"{info['per']:.1f}배")
-            with ic2:
-                if info.get('pbr'): st.metric("PBR", f"{info['pbr']:.2f}배")
-                if info.get('roe'): st.metric("ROE", f"{info['roe']*100:.1f}%")
-            if info.get('sector') and info['sector'] != '-': st.caption(f"섹터: {info['sector']}")
-            if info.get('dividend'): st.caption(f"배당수익률: {info['dividend']*100:.2f}%")
-
-    # AI 투자 상담
+    # ── 하단 탭: 차트·수급·실적·뉴스·AI상담 ─────────────────────────────────
     st.divider()
-    render_ai_chat(code, name, z, sig)
+    _tab_chart, _tab_flow, _tab_earn, _tab_news, _tab_ai = st.tabs(
+        ["📈 차트", "💰 수급", "📊 실적", "📰 뉴스", "🤖 AI상담"])
+
+    with _tab_chart:
+        st.plotly_chart(build_chart(df, z), use_container_width=True)
+        with st.expander("🔍 상세 기술 분석"):
+            rsi_v = z['rsi']; ma5_v = df['MA5'].iloc[-1]
+            ma20_v = df['MA20'].iloc[-1]; ma60_v = df['MA60'].iloc[-1]
+            macd_v = df['MACD'].iloc[-1]; macd_s = df['MACD_signal'].iloc[-1]
+            ec1, ec2 = st.columns(2)
+            with ec1:
+                if rsi_v:
+                    rsi_lbl = '과매도 ↗' if rsi_v < 30 else ('과매수 ↘' if rsi_v > 70 else '중립')
+                    st.metric("RSI (14일)", f"{rsi_v:.1f}", rsi_lbl)
+                st.metric("MACD", "골든크로스 (매수)" if macd_v > macd_s else "데드크로스 (매도)")
+            with ec2:
+                trend = ('정배열 — 상승 추세' if ma5_v > ma20_v > ma60_v
+                         else '역배열 — 하락 추세' if ma5_v < ma20_v < ma60_v else '혼조')
+                st.metric("이동평균 배열", trend)
+                st.metric("MA20 / MA60", f"{int(ma20_v):,} / {int(ma60_v):,}원")
+
+    with _tab_flow:
+        st.markdown("#### 💰 기관/외국인 수급 현황 (최근 20일)")
+        render_investor_flow(flow_df)
+
+    with _tab_earn:
+        with st.expander("📊 분기 실적 추이 (최근 4분기)", expanded=True):
+            render_quarterly_earnings(earnings)
+        if _QE:
+            with st.expander("🔬 Walk-Forward 백테스트 (과거 성과 시뮬레이션)"):
+                _render_backtest(code, months)
+
+    with _tab_news:
+        render_news_tab(name, code, z, sig)
+
+    with _tab_ai:
+        render_ai_chat(code, name, z, sig)
 
     st.divider()
     st.caption("⚠️ **투자 주의사항** — 본 분석은 기술적 지표 기반 참고 정보이며 투자 권유가 아닙니다. 모든 투자 판단과 책임은 투자자 본인에게 있습니다.")
@@ -2689,21 +2903,51 @@ def render_screener_tab():
     n_total = len(SCREEN_UNIVERSE)
     st.caption(f"총 {n_total}개 종목 · 신호 점수 순 정렬 · 1시간 캐시")
 
+    # ── 저장된 조건 불러오기 (쿠키) ─────────────────────────────────────────
+    _saved_filter = {}
+    if _ctrl is not None:
+        try:
+            _raw_f = _ctrl.get('kr_screener_filter')
+            if _raw_f:
+                _saved_filter = json.loads(_raw_f) if isinstance(_raw_f, str) else _raw_f
+        except Exception:
+            pass
+
     # ── 조건 설정 ────────────────────────────────────────────────────────────
     with st.expander("⚙️ 스캔 조건 설정", expanded=True):
+        # 저장/불러오기 버튼 행
+        _sv1, _sv2 = st.columns(2)
+        _load_clicked = _sv1.button("📂 조건 불러오기", use_container_width=True,
+                                     key="scr_load",
+                                     disabled=not bool(_saved_filter))
+        _save_now = False  # 저장 버튼은 슬라이더 값 알고 난 뒤에 처리
+
+        # 저장된 값으로 초기값 설정
+        if _load_clicked and _saved_filter:
+            st.session_state['_scr_min_score']  = _saved_filter.get('min_score', 65)
+            st.session_state['_scr_max_rsi']    = _saved_filter.get('max_rsi', 60)
+            st.session_state['_scr_max_pos_pct'] = _saved_filter.get('max_pos_pct', 55)
+            st.toast("✅ 조건 불러오기 완료!", icon="📂")
+
         c1, c2, c3 = st.columns(3)
         with c1:
             min_score = st.slider(
-                "🎯 최소 신호 점수", 50, 85, 65, step=5,
-                help="65↑ 매수 고려 / 높을수록 강한 신호만")
+                "🎯 최소 신호 점수", 50, 85,
+                st.session_state.get('_scr_min_score', 65), step=5,
+                help="65↑ 매수 고려 / 높을수록 강한 신호만",
+                key="scr_slider_min_score")
         with c2:
             max_rsi = st.slider(
-                "📉 RSI 상한선", 40, 75, 60, step=5,
-                help="낮을수록 과매도 구간 종목만 (30=과매도, 70=과매수)")
+                "📉 RSI 상한선", 40, 75,
+                st.session_state.get('_scr_max_rsi', 60), step=5,
+                help="낮을수록 과매도 구간 종목만 (30=과매도, 70=과매수)",
+                key="scr_slider_max_rsi")
         with c3:
             max_pos_pct = st.slider(
-                "📍 52주 위치 상한 (%)", 30, 80, 55, step=5,
-                help="낮을수록 52주 저점 근처 종목만")
+                "📍 52주 위치 상한 (%)", 30, 80,
+                st.session_state.get('_scr_max_pos_pct', 55), step=5,
+                help="낮을수록 52주 저점 근처 종목만",
+                key="scr_slider_max_pos_pct")
 
         # 등급 체크박스
         st.markdown("**📊 종목 등급**")
@@ -2725,6 +2969,22 @@ def render_screener_tab():
             placeholder="전체 섹터 스캔")
         if not selected_sectors:
             selected_sectors = ['전체']
+
+        # 💾 조건 저장 버튼 (슬라이더 값 확정 후)
+        if _sv2.button("💾 조건 저장", use_container_width=True, key="scr_save"):
+            _filter_data = {
+                'min_score': min_score, 'max_rsi': max_rsi,
+                'max_pos_pct': max_pos_pct,
+            }
+            if _ctrl is not None:
+                try:
+                    import datetime as _dt
+                    _ctrl.set('kr_screener_filter',
+                              json.dumps(_filter_data, ensure_ascii=False),
+                              expires=_dt.datetime.now() + _dt.timedelta(days=365))
+                except Exception:
+                    pass
+            st.toast("✅ 조건 저장 완료!", icon="💾")
 
     n_scan = sum(
         1 for info in SCREEN_UNIVERSE.values()
