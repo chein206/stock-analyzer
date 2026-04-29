@@ -1322,6 +1322,8 @@ def ask_ai_advisor(question: str, code: str, name: str, z: dict, sig: dict,
 1. 위 데이터를 적극 활용해 구체적으로 답변하세요 (가격, % 수치 포함).
 2. 사용자가 보유 수량·평균 단가를 알려주면 수익률·손익 계산도 해주세요.
 3. 분할 매수/매도 전략은 2~3단계로 나눠 설명하세요.
+4. 시나리오 요청 시 반드시 마크다운 표(| 컬럼 | 값 |)로 단계별 정리하세요.
+   표 예시: 단계 | 조건 | 수량 | 가격 | 예상 손익
 4. 마지막에 항상 "⚠️ 투자 결정과 책임은 본인에게 있습니다" 한 줄 추가.
 5. 절대 수익 보장 표현 금지. 한국어로만 답변."""
 
@@ -1365,6 +1367,25 @@ def render_ai_chat(code: str, name: str, z: dict, sig: dict):
                                         st.session_state[chat_key][:-1])
             st.session_state[chat_key].append({"role": "assistant", "content": answer})
             st.rerun()
+
+    # 시나리오 버튼 (풀 너비 강조)
+    scenario_q = (
+        f"10주 기준으로 매수·매도·손절 전체 시나리오를 세워주세요. "
+        f"현재가 {int(z['last']):,}원 기준으로 "
+        f"① 언제/어떻게 매수할지 (분할 단계 포함) "
+        f"② 1차·2차 익절 시점과 수량 "
+        f"③ 손절 조건과 예상 손실금액 "
+        f"④ 전체 투자금 대비 기대 수익/손실 요약을 표로 정리해주세요."
+    )
+    if st.button("📋 매수·매도·손절 시나리오 (10주 기준)",
+                 key=f"quick_{code}_scenario",
+                 use_container_width=True, type="primary"):
+        st.session_state[chat_key].append({"role": "user", "content": scenario_q})
+        with st.spinner("AI가 시나리오를 작성 중... (10~20초)"):
+            answer = ask_ai_advisor(scenario_q, code, name, z, sig,
+                                    st.session_state[chat_key][:-1])
+        st.session_state[chat_key].append({"role": "assistant", "content": answer})
+        st.rerun()
 
     # 대화 기록 표시
     for msg in st.session_state[chat_key]:
