@@ -520,7 +520,7 @@ def get_valid_kakao_token() -> str | None:
     return token_data.get('access_token')
 
 def send_kakao_message(access_token: str, text: str) -> tuple[bool, dict]:
-    """카카오 나에게 보내기"""
+    """카카오 나에게 보내기 — result_code 0 이어야 실제 전송 성공"""
     template = {
         "object_type": "text",
         "text":        text[:2000],
@@ -536,7 +536,13 @@ def send_kakao_message(access_token: str, text: str) -> tuple[bool, dict]:
         data={"template_object": json.dumps(template, ensure_ascii=False)},
         timeout=10,
     )
-    return r.status_code == 200, r.json()
+    try:
+        body = r.json()
+    except Exception:
+        body = {"msg": r.text, "code": r.status_code}
+    # HTTP 200 + result_code 0 = 진짜 성공
+    success = (r.status_code == 200) and (body.get('result_code', -1) == 0)
+    return success, body
 
 def format_kakao_message(code: str, name: str, z: dict, sig: dict) -> str:
     arrow = '▲' if z['day_chg'] >= 0 else '▼'
@@ -903,12 +909,15 @@ def render_sidebar():
                         ok, res = send_kakao_message(
                             tok,
                             "📈 주식 분석기 연결 테스트\n카카오톡 전송이 정상 작동합니다! ✅")
-                        if ok:
-                            st.toast("전송 성공! ✅", icon="📱")
+                        # result_code 0 = 실제 성공, 나머지는 실패
+                        result_code = res.get('result_code', -1) if ok else -1
+                        if ok and result_code == 0:
+                            st.toast("카카오톡 전송 성공! 📱", icon="✅")
                         else:
-                            err_code = res.get('code', '')
+                            err_code = res.get('code', result_code)
                             err_msg  = res.get('msg', str(res))
                             st.error(f"전송 실패 ({err_code}): {err_msg}")
+                            st.code(str(res), language=None)  # 실제 응답 출력
                             if err_code in (-401, -403):
                                 st.caption("토큰 만료됨. 연결 해제 후 재연결해주세요.")
                     else:
