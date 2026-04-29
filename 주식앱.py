@@ -1191,15 +1191,26 @@ def _render_regime_badge(regime: dict):
     )
 
 
-def _render_backtest(df_raw: "pd.DataFrame"):
+@st.cache_data(ttl=3600)
+def _cached_backtest(code: str, months: int):
+    """백테스트 연산 캐시 (1시간). expander 열 때마다 재실행 방지."""
+    if not _QE:
+        return None
+    df_raw = get_stock_data(code, months)
+    if df_raw is None or df_raw.empty or len(df_raw) < 60:
+        return None
+    return Backtester.run(df_raw, initial_capital=10_000_000,
+                          walk_forward=len(df_raw) >= 120, oos_ratio=0.3)
+
+
+def _render_backtest(code: str, months: int):
     """백테스트 결과 렌더링 (expander 안에서 호출)."""
     if not _QE:
         st.caption("quant_engine이 설치되지 않았습니다."); return
 
-    use_wf = len(df_raw) >= 120
-    with st.spinner("Walk-Forward 백테스트 실행 중..."):
-        result = Backtester.run(df_raw, initial_capital=10_000_000,
-                                walk_forward=use_wf, oos_ratio=0.3)
+    result = _cached_backtest(code, months)
+    if result is None:
+        st.caption("데이터 부족으로 백테스트를 실행할 수 없습니다."); return
 
     s = result.summary()
     if not result.trades:
@@ -1339,9 +1350,13 @@ def find_sr(df, n=5):
 def build_chart(df, z):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        row_heights=[0.58,0.21,0.21], vertical_spacing=0.04,
-                        subplot_titles=('주가 (캔들차트)','RSI','MACD'))
+    has_vol = 'Volume' in df.columns and df['Volume'].sum() > 0
+    rows    = 4 if has_vol else 3
+    heights = [0.50, 0.17, 0.17, 0.16] if has_vol else [0.58, 0.21, 0.21]
+    titles  = ('주가 (캔들차트)', 'RSI', 'MACD', '거래량') if has_vol else ('주가 (캔들차트)', 'RSI', 'MACD')
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
+                        row_heights=heights, vertical_spacing=0.03,
+                        subplot_titles=titles)
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='주가',
         increasing_line_color='#E24B4A', decreasing_line_color='#185FA5',
@@ -1378,13 +1393,30 @@ def build_chart(df, z):
                              line=dict(color='#534AB7', width=1.5)), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACD_signal'], name='Signal',
                              line=dict(color='#E24B4A', width=1.5)), row=3, col=1)
-    fig.update_layout(height=580, paper_bgcolor='white', plot_bgcolor='#FAFAF9',
+    # ── 거래량 (4번째 서브플롯) ───────────────────────────────────────────
+    if has_vol:
+        vol_colors = [
+            '#E24B4A' if o <= c else '#185FA5'
+            for o, c in zip(df['Open'].fillna(0), df['Close'].fillna(0))
+        ]
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['Volume'],
+            name='거래량', marker_color=vol_colors, opacity=0.65), row=4, col=1)
+        if 'Vol_MA20' in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['Vol_MA20'], name='거래량MA20',
+                line=dict(color='#D4870E', width=1.4), opacity=0.9), row=4, col=1)
+
+    chart_h = 680 if has_vol else 580
+    fig.update_layout(height=chart_h, paper_bgcolor='white', plot_bgcolor='#FAFAF9',
                       legend=dict(orientation='h', y=1.02, x=1, xanchor='right', font=dict(size=11)),
                       xaxis_rangeslider_visible=False, hovermode='x unified',
                       margin=dict(l=50, r=90, t=36, b=24), font=dict(size=11))
     fig.update_xaxes(showgrid=True, gridcolor='#EEE', gridwidth=0.5)
     fig.update_yaxes(showgrid=True, gridcolor='#EEE', tickformat=',')
     fig.update_yaxes(range=[0, 100], row=2, col=1)
+    if has_vol:
+        fig.update_yaxes(tickformat='.2s', row=4, col=1)   # 1.2M 형식
     return fig
 
 
@@ -1469,6 +1501,95 @@ def render_quarterly_earnings(earnings):
     fig.update_yaxes(showgrid=True, gridcolor='#EEE', tickformat=',')
     st.plotly_chart(fig, use_container_width=True)
     st.caption("※ Yahoo Finance 기준 · 단위: 억원 · 음수=적자")
+
+
+# ── AI 채팅 액션 헬퍼 ────────────────────────────────────────────────────────
+def _clipboard_btn(text: str, key: str):
+    """클립보드 복사 버튼 (JavaScript, UTF-8 안전)."""
+    import base64
+    import streamlit.components.v1 as components
+    # base64 encode → JS에서 decode (한국어 포함 모든 문자 안전)
+    b64 = base64.b64encode(text.encode('utf-8')).decode()
+    components.html(
+        f"""
+        <button id="btn_{key}" onclick="
+            try {{
+                const raw = atob('{b64}');
+                const bytes = new Uint8Array(raw.length);
+                for (let i=0;i<raw.length;i++) bytes[i]=raw.charCodeAt(i);
+                const decoded = new TextDecoder('utf-8').decode(bytes);
+                navigator.clipboard.writeText(decoded).then(() => {{
+                    document.getElementById('btn_{key}').textContent='✅ 복사됨!';
+                    setTimeout(() => document.getElementById('btn_{key}').textContent='📋 복사', 2000);
+                }});
+            }} catch(e) {{
+                alert('복사 실패: ' + e);
+            }}
+        "
+        style="width:100%;padding:5px 10px;background:#F5F5F5;border:1px solid #DDD;
+               border-radius:7px;cursor:pointer;font-size:13px;font-family:inherit">
+        📋 복사
+        </button>
+        """,
+        height=34,
+    )
+
+
+def _kakao_send_btn(text: str, code: str, name: str, z: dict, key: str):
+    """카카오톡 전송 버튼 (Streamlit 버튼)."""
+    kakao_token = st.session_state.get('kakao_token')
+    if not kakao_token:
+        return
+    if st.button("📱 카카오", key=f"kk_{key}", use_container_width=True):
+        access_token = get_valid_kakao_token()
+        if access_token:
+            header = (f"📈 {name}({code}) AI 분석\n"
+                      f"현재가 {int(z['last']):,}원 | 매수가 {int(z['buy_mid']):,}원\n\n")
+            full_msg = header + text
+            ok, result = send_kakao_message(access_token, full_msg)
+            if ok:
+                st.toast("카카오톡으로 전송했어요! ✅", icon="📱")
+            else:
+                err = result.get('msg', str(result))
+                if result.get('code') in (-401, -403):
+                    _clear_kakao_token()
+                    st.warning("카카오 토큰 만료. 사이드바에서 재로그인 해주세요.")
+                else:
+                    st.error(f"전송 실패: {err}")
+        else:
+            st.warning("카카오 토큰이 만료됐어요.")
+
+
+def _scenario_card(text: str, code: str, name: str, z: dict, key: str):
+    """AI 응답을 시각적 카드로 렌더링 (스크린샷용)."""
+    arrow = '▲' if z['day_chg'] >= 0 else '▼'
+    chg_col = '#C0392B' if z['day_chg'] >= 0 else '#1A5FAC'
+    # 마크다운 표(|)가 포함된 경우 그대로 st.markdown으로 렌더링
+    st.markdown(
+        f"""
+        <div style='border:2px solid #534AB7;border-radius:14px;padding:20px 22px;
+                    background:linear-gradient(135deg,#F8F8FF 0%,#EEF0FF 100%);
+                    margin:4px 0'>
+          <div style='font-size:13px;color:#888;margin-bottom:6px'>
+            📸 시나리오 카드 — 스크린샷 후 공유하세요
+          </div>
+          <div style='font-size:17px;font-weight:800;color:#222;margin-bottom:2px'>
+            📈 {name} <span style='color:#888;font-size:13px'>({code})</span>
+          </div>
+          <div style='font-size:14px;color:{chg_col};margin-bottom:12px'>
+            현재가 {int(z['last']):,}원 {arrow}{abs(z['day_chg']):.2f}% &nbsp;|&nbsp;
+            매수가 {int(z['buy_mid']):,}원 &nbsp;|&nbsp;
+            손절 {int(z['stop']):,}원 &nbsp;|&nbsp;
+            목표 {int(z['tgt1']):,}원
+          </div>
+          <hr style='border:none;border-top:1px solid #DDD;margin:8px 0'>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    # 본문은 st.markdown으로 (표 렌더링 지원)
+    st.markdown(text)
+    st.caption("📱 위 내용을 스크린샷해서 카카오톡으로 공유하세요")
 
 
 # ── AI 투자 상담 ──────────────────────────────────────────────────────────────
@@ -1581,10 +1702,29 @@ def render_ai_chat(code: str, name: str, z: dict, sig: dict):
         st.rerun()
 
     # 대화 기록 표시
-    for msg in st.session_state[chat_key]:
+    for idx, msg in enumerate(st.session_state[chat_key]):
         with st.chat_message(msg["role"],
                              avatar="🧑" if msg["role"] == "user" else "🤖"):
             st.markdown(msg["content"])
+
+        # ── 어시스턴트 응답 하단 액션 버튼 ─────────────────────────────
+        if msg["role"] == "assistant":
+            btn_key = f"{code}_{idx}"
+            content = msg["content"]
+            ab1, ab2, ab3, ab4 = st.columns([1.4, 1.4, 1.4, 5])
+            with ab1:
+                _clipboard_btn(content, btn_key)
+            with ab2:
+                _kakao_send_btn(content, code, name, z, btn_key)
+            with ab3:
+                if st.button("📸 카드", key=f"card_{btn_key}",
+                             use_container_width=True,
+                             help="스크린샷용 시나리오 카드 보기"):
+                    st.session_state[f"show_card_{btn_key}"] = \
+                        not st.session_state.get(f"show_card_{btn_key}", False)
+            # 카드 토글
+            if st.session_state.get(f"show_card_{btn_key}", False):
+                _scenario_card(content, code, name, z, btn_key)
 
     # 입력창
     placeholder = f"예: {int(z['last']*0.9):,}원에 100주 보유 중인데 매도 계획 어떻게 잡을까요?"
@@ -1857,7 +1997,7 @@ def render_analysis(code, name, months):
 
     if _QE:
         with st.expander("🔬 Walk-Forward 백테스트 (과거 성과 시뮬레이션)"):
-            _render_backtest(df_raw)
+            _render_backtest(code, months)
 
     if any([info.get('per'), info.get('pbr'), info.get('market_cap')]):
         with st.expander("🏢 기업 기본 정보"):
