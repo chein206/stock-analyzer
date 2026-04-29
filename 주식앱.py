@@ -17,6 +17,14 @@ import requests
 import warnings
 warnings.filterwarnings('ignore')
 
+# ── Quant Engine (선택적 import — 없어도 앱 동작) ─────────────────────────────
+try:
+    from quant_engine import (MarketRegime, SignalEngine,
+                               Backtester, Recommender, AlertMonitor)
+    _QE = True
+except Exception:
+    _QE = False
+
 st.set_page_config(
     page_title="📈 주식 분석기",
     page_icon="📈",
@@ -778,6 +786,27 @@ def render_sidebar():
                 "⚪ 지연 데이터 (KIS 미연동)</div>",
                 unsafe_allow_html=True)
 
+        # ── 조건 알림 (AlertMonitor) ─────────────────────────────────────
+        if _QE and st.session_state.get('watchlist'):
+            zones_cache = st.session_state.get('zones_cache', {})
+            wl_with_z = [
+                {**item, 'z': zones_cache[item['code']]}
+                for item in st.session_state['watchlist']
+                if item['code'] in zones_cache
+            ]
+            if wl_with_z:
+                if 'alert_cache' not in st.session_state:
+                    st.session_state['alert_cache'] = {}
+                alerts = AlertMonitor.check(
+                    wl_with_z, get_quick_price,
+                    st.session_state['alert_cache'])
+                for al in alerts:
+                    lvl = al['level']
+                    if   lvl == 'success': st.success(f"{al['emoji']} {al['msg']}")
+                    elif lvl == 'error':   st.error(f"{al['emoji']} {al['msg']}")
+                    elif lvl == 'warning': st.warning(f"{al['emoji']} {al['msg']}")
+                    else:                  st.info(f"{al['emoji']} {al['msg']}")
+
         st.caption("💡 사이드바가 안 보이면\n화면 왼쪽 **>** 버튼을 누르세요")
 
 
@@ -904,6 +933,25 @@ def get_quarterly_earnings(code):
                 return fin
         except Exception: pass
     return None
+
+
+@st.cache_data(ttl=900)
+def get_kospi_regime() -> dict | None:
+    """KOSPI 시장 상태 감지 (15분 캐시). quant_engine 없으면 None 반환."""
+    if not _QE:
+        return None
+    try:
+        import FinanceDataReader as fdr
+        from datetime import datetime, timedelta
+        end   = datetime.today()
+        start = end - timedelta(days=420)
+        df = fdr.DataReader('KS11', start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
+        if df is None or df.empty or len(df) < 60:
+            return None
+        df.columns = [c.capitalize() for c in df.columns]
+        return MarketRegime.detect(df)
+    except Exception:
+        return None
 
 
 # ── 기술지표 ─────────────────────────────────────────────────────────────────
@@ -1114,6 +1162,151 @@ def build_signal_detail(z: dict, sig: dict, df) -> str:
         f"<div style='margin-top:4px'>{chip_html}</div>"
         f"<div style='margin-top:10px;font-size:13px;line-height:1.7;opacity:0.9'>{action}</div>"
     )
+
+
+def _render_regime_badge(regime: dict):
+    """KOSPI 시장 상태 배지 (메인 페이지 상단 표시용)."""
+    if not regime:
+        return
+    c = regime['color']
+    label    = regime['label']
+    emoji    = regime['emoji']
+    strength = regime['strength']
+    details  = regime.get('details', {})
+    ma200_gap = details.get('ma200_gap', 0)
+    ret20     = details.get('ret_20d',   0)
+    adx       = details.get('adx',       0)
+    st.markdown(
+        f"<div style='display:inline-flex;align-items:center;gap:10px;"
+        f"background:rgba(0,0,0,0.04);border:1px solid {c}44;"
+        f"border-radius:10px;padding:8px 14px;margin-bottom:8px'>"
+        f"<span style='font-size:22px'>{emoji}</span>"
+        f"<div>"
+        f"<span style='font-weight:800;font-size:15px;color:{c}'>KOSPI {label}</span>"
+        f"<span style='font-size:12px;color:var(--text-muted);margin-left:8px'>신뢰도 {strength}%</span><br>"
+        f"<span style='font-size:12px;color:var(--text-sub)'>"
+        f"MA200 대비 {ma200_gap:+.1f}% · 20일 수익률 {ret20:+.1f}% · ADX {adx:.0f}"
+        f"</span></div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_backtest(df_raw: "pd.DataFrame"):
+    """백테스트 결과 렌더링 (expander 안에서 호출)."""
+    if not _QE:
+        st.caption("quant_engine이 설치되지 않았습니다."); return
+
+    use_wf = len(df_raw) >= 120
+    with st.spinner("Walk-Forward 백테스트 실행 중..."):
+        result = Backtester.run(df_raw, initial_capital=10_000_000,
+                                walk_forward=use_wf, oos_ratio=0.3)
+
+    s = result.summary()
+    if not result.trades:
+        st.caption("백테스트 기간 내 신호가 발생하지 않았습니다."); return
+
+    # ── 핵심 지표 ─────────────────────────────────────────────────────
+    m1, m2, m3, m4 = st.columns(4)
+    ret  = s['총 수익률 (%)']
+    ret_col = '#1D9E75' if ret >= 0 else '#E24B4A'
+    m1.metric("총 수익률",   f"{ret:+.1f}%",  delta=None)
+    m2.metric("승률",        f"{s['승률 (%)']:.0f}%")
+    m3.metric("MDD",         f"{s['MDD (%)']:.1f}%")
+    m4.metric("Sharpe",      f"{s['Sharpe Ratio']:.2f}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("거래 횟수",   f"{s['거래 횟수']}건")
+    c2.metric("Profit Factor", f"{s['Profit Factor']}")
+    c3.metric("평균 수익",   f"{s['평균 수익 (%)']:+.1f}%")
+    c4.metric("기댓값",      f"{s['기댓값 (%)']:+.2f}%")
+
+    st.caption(f"📅 검증 기간: {s['검증 기간']}")
+
+    # ── 주의사항 ──────────────────────────────────────────────────────
+    st.info(
+        "⚠️ **백테스트 주의사항** — 과거 성과가 미래를 보장하지 않습니다. "
+        "Walk-Forward(OOS 30%) 방식으로 과적합을 최소화했으나 실전 수익률은 다를 수 있습니다. "
+        "수수료 0.15% + 슬리피지 0.1% 포함 계산.",
+        icon="ℹ️"
+    )
+
+    # ── 거래 내역 ─────────────────────────────────────────────────────
+    if result.trades:
+        trades_df = result.trades_df()
+        with st.expander(f"📋 거래 내역 ({len(result.trades)}건)"):
+            st.dataframe(trades_df, use_container_width=True, hide_index=True)
+
+    # ── 에쿼티 커브 ───────────────────────────────────────────────────
+    if len(result.equity_curve) > 5:
+        import plotly.graph_objects as go
+        eq  = result.equity_curve
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=eq.index, y=eq.values,
+            fill='tozeroy', fillcolor='rgba(29,158,117,0.10)',
+            line=dict(color='#1D9E75', width=2), name='자본'))
+        fig.add_hline(y=10_000_000, line=dict(color='#888', width=1, dash='dot'))
+        fig.update_layout(
+            height=200, margin=dict(l=50, r=20, t=16, b=24),
+            yaxis_title='자본 (원)', paper_bgcolor='white', plot_bgcolor='#FAFAF9',
+            showlegend=False, font=dict(size=11),
+            yaxis=dict(tickformat=','))
+        fig.update_xaxes(showgrid=True, gridcolor='#EEE')
+        fig.update_yaxes(showgrid=True, gridcolor='#EEE')
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_top5(top5: list, regime: dict):
+    """TOP-5 추천 종목 렌더링."""
+    if not top5:
+        return
+
+    r_lbl = regime['label']  if regime else '시장 미감지'
+    r_emoji = regime['emoji'] if regime else '❓'
+
+    st.markdown(f"### 🏆 AI 추천 TOP-5  <span style='font-size:14px;color:var(--text-muted)'>({r_emoji} {r_lbl} 기준)</span>",
+                unsafe_allow_html=True)
+    st.caption("복합 랭킹: 신호 점수 60% + R:R 30% + 52주 위치 역수 10%")
+
+    for i, r in enumerate(top5, 1):
+        reason = Recommender.reason(r, regime)
+        tier   = r.get('tier', '중')
+        tc = _TIER_COLOR.get(tier, '#888')
+        tbg= _TIER_BG.get(tier, 'rgba(0,0,0,0.05)')
+        tlbl = _TIER_LABEL.get(tier, tier)
+        loss  = round((r['buy_mid'] - r['stop'])  / r['buy_mid'] * 100, 1) if r['buy_mid'] else 0
+        gain  = round((r['tgt1']   - r['buy_mid'])/ r['buy_mid'] * 100, 1) if r['buy_mid'] else 0
+
+        rc1, rc2, rc3 = st.columns([4, 3, 2])
+        with rc1:
+            st.markdown(
+                f"<div style='font-size:15px;font-weight:800'>{i}. {r['emoji']} {r['name']}</div>"
+                f"<div class='app-label'>"
+                f"<span style='background:{tbg};color:{tc};border-radius:4px;"
+                f"padding:1px 6px;font-size:11px;font-weight:700'>{tlbl}</span>"
+                f"&nbsp;{r['sector']} · {r['code']}</div>"
+                f"<div style='font-size:12px;color:var(--text-sub);margin-top:3px'>{reason}</div>",
+                unsafe_allow_html=True)
+        with rc2:
+            rsi_c = ('#1D9E75' if r.get('rsi') and r['rsi'] < 40
+                     else '#E24B4A' if r.get('rsi') and r['rsi'] > 65
+                     else 'var(--text-label)')
+            st.markdown(
+                f"<div class='app-muted' style='line-height:1.9'>"
+                f"점수: <b style='color:#1D9E75;font-size:16px'>{r['score']}</b> · "
+                f"RSI: <b style='color:{rsi_c}'>{r.get('rsi', '-')}</b><br>"
+                f"매수가: <b>{r['buy_mid']:,}원</b><br>"
+                f"손절 <b style='color:#E24B4A'>-{loss}%</b> · "
+                f"목표 <b style='color:#1D9E75'>+{gain}%</b> · R:R=1:{r['rr']}"
+                f"</div>",
+                unsafe_allow_html=True)
+        with rc3:
+            if st.button("📊 분석", key=f"top5_{r['code']}_{i}", use_container_width=True):
+                st.session_state['auto_code'] = r['code']
+                st.session_state['auto_name'] = r['name']
+                st.session_state['go_analysis'] = True
+                st.rerun()
+        st.divider()
 
 
 def price_position(last, z):
@@ -1457,7 +1650,19 @@ def render_analysis(code, name, months):
         if wh != wl:
             z['pos_pct'] = round((kis_last - wl) / (wh - wl) * 100, 1)
 
-    sig = calc_signal(df, z, flow_df)
+    # ── 관심종목 zones 캐시 저장 (AlertMonitor용) ─────────────────────
+    if 'zones_cache' not in st.session_state:
+        st.session_state['zones_cache'] = {}
+    st.session_state['zones_cache'][code] = z
+
+    # ── 신호 평가 ─────────────────────────────────────────────────────
+    # quant_engine 있으면 SignalEngine(4단계) 사용, 없으면 기존 calc_signal
+    if _QE:
+        regime = get_kospi_regime()
+        sig = SignalEngine.evaluate(df, z, flow_df, regime)
+    else:
+        regime = None
+        sig = calc_signal(df, z, flow_df)
     sup, res = find_sr(df)
 
     # 종목 헤더 + 버튼들
@@ -1520,11 +1725,24 @@ def render_analysis(code, name, months):
     # 신호 박스
     s = sig
     signal_detail = build_signal_detail(z, sig, df)
+    regime_tag = ""
+    if regime:
+        regime_tag = (f"<span style='font-size:11px;background:{regime['color']}22;"
+                      f"color:{regime['color']};border-radius:4px;padding:1px 7px;"
+                      f"font-weight:700;margin-left:6px'>"
+                      f"{regime['emoji']} {regime['label']}</span>")
+    level_info = ""
+    if _QE and sig.get('raw_score') is not None:
+        adj = sig.get('regime_adj', 0)
+        adj_txt = f"{adj:+d}" if adj != 0 else "±0"
+        level_info = (f"<div style='font-size:11px;opacity:0.65;margin-top:2px'>"
+                      f"원점수 {sig['raw_score']} 시장보정 {adj_txt}</div>")
     st.markdown(
         f"<div class='signal-box' style='background:{s['bg']};border:2px solid {s['color']}55'>"
         f"<div class='signal-emoji'>{s['emoji']}</div>"
-        f"<div class='signal-label' style='color:{s['color']}'>{s['label']}</div>"
+        f"<div class='signal-label' style='color:{s['color']}'>{s['label']}{regime_tag}</div>"
         f"<div class='signal-score' style='color:{s['color']}'>종합 점수 {s['score']}/100 (기술지표 + 수급)</div>"
+        f"{level_info}"
         f"<div class='signal-desc'>{signal_detail}</div></div>", unsafe_allow_html=True)
 
     # 현재가 위치
@@ -1636,6 +1854,10 @@ def render_analysis(code, name, months):
 
     with st.expander("📊 분기 실적 추이 (최근 4분기)"):
         render_quarterly_earnings(earnings)
+
+    if _QE:
+        with st.expander("🔬 Walk-Forward 백테스트 (과거 성과 시뮬레이션)"):
+            _render_backtest(df_raw)
 
     if any([info.get('per'), info.get('pbr'), info.get('market_cap')]):
         with st.expander("🏢 기업 기본 정보"):
@@ -1973,7 +2195,7 @@ def _scan_one(args):
             return None
         df  = calc_indicators(df_raw)
         z   = calc_zones(df, {})
-        sig = calc_signal(df, z)
+        sig = SignalEngine.evaluate(df, z) if _QE else calc_signal(df, z)
         return {
             'code': code, 'name': name, 'sector': sector, 'tier': tier,
             'score':   sig['score'],
@@ -2162,6 +2384,13 @@ def render_screener_tab():
 
     st.caption(f"⏱ 결과는 1시간 캐시됩니다. 새로 스캔하려면 버튼을 다시 눌러주세요.")
 
+    # ── TOP-5 추천 (Recommender) ──────────────────────────────────────
+    if results and _QE:
+        st.divider()
+        _regime_scr = get_kospi_regime()
+        top5 = Recommender.get_top_n(results, _regime_scr, n=5, min_rr=1.5)
+        _render_top5(top5, _regime_scr)
+
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
@@ -2173,6 +2402,13 @@ def main():
 
     st.markdown("## 📈 한국 주식 분석기")
     st.caption("실시간 데이터 기반 · 기술지표 + 수급 분석 · 투자 판단은 본인 책임")
+
+    # KOSPI 시장 상태 배지
+    if _QE:
+        _regime_main = get_kospi_regime()
+        if _regime_main:
+            _render_regime_badge(_regime_main)
+
     st.divider()
 
     # 스크리너/포트폴리오 📊 버튼 → 종목 분석 탭으로 JS 자동 전환
