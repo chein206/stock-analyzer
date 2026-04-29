@@ -1075,6 +1075,26 @@ def render_sidebar():
                             st.session_state['price_alerts'].pop(code, None)
                             _sync_alerts_to_github(st.session_state['price_alerts'])
                             st.rerun()
+                    # 테스트 버튼
+                    if st.button("🔔 알림 테스트", key=f"al_test_{code}", use_container_width=True):
+                        tok = get_valid_kakao_token()
+                        tgt_v = int(_al.get('target') or 0)
+                        stp_v = int(_al.get('stop')   or 0)
+                        test_msg = (
+                            f"🔔 [{name}] 알림 테스트\n"
+                            f"현재가 {int(price):,}원\n"
+                            f"🎯 목표가: {tgt_v:,}원\n"
+                            f"🛑 손절가: {stp_v:,}원\n"
+                            f"✅ 알림이 정상 작동하면 이 메시지가 카카오톡으로 옵니다!"
+                        )
+                        if tok:
+                            ok, res = send_kakao_message(tok, test_msg)
+                            if ok:
+                                st.toast(f"✅ 카카오톡 테스트 전송 성공!", icon="📱")
+                            else:
+                                st.error(f"전송 실패: {res.get('msg', str(res))}")
+                        else:
+                            st.warning("카카오톡 미연결 — 사이드바에서 연결 후 사용하세요")
 
         # ── 카카오톡 연결 ─────────────────────────────────────
         st.divider()
