@@ -271,91 +271,194 @@ def kis_price(code: str, _token: str, _base_url: str = _KIS_REAL) -> dict | None
 KAKAO_REST_KEY  = st.secrets.get("kakao_rest_key", "")
 REDIRECT_URI    = "https://stock-analyzer-egqwnt22pkfgzdgxuapppyw.streamlit.app"
 
-def kakao_auth_url():
+# Secrets에 액세스 토큰 직접 저장 시 OAuth 없이 바로 사용 (가장 안정적)
+_KAKAO_STATIC_TOKEN = st.secrets.get("kakao_access_token", "")
+
+
+def kakao_auth_url() -> str:
+    import urllib.parse
     return (
         "https://kauth.kakao.com/oauth/authorize"
         f"?client_id={KAKAO_REST_KEY}"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"&redirect_uri={urllib.parse.quote(REDIRECT_URI, safe='')}"
         "&response_type=code"
         "&scope=talk_message"
     )
 
-def _exchange_kakao_code(code: str):
-    r = requests.post("https://kauth.kakao.com/oauth/token", data={
-        "grant_type":   "authorization_code",
-        "client_id":    KAKAO_REST_KEY,
-        "redirect_uri": REDIRECT_URI,
-        "code":         code,
-    }, timeout=10)
-    return r.status_code, r.json()
 
-def _refresh_kakao_token(refresh_token: str):
-    r = requests.post("https://kauth.kakao.com/oauth/token", data={
-        "grant_type":    "refresh_token",
-        "client_id":     KAKAO_REST_KEY,
-        "refresh_token": refresh_token,
-    }, timeout=10)
-    return r.status_code, r.json()
+def _exchange_kakao_code(code: str) -> tuple[int, dict]:
+    try:
+        r = requests.post(
+            "https://kauth.kakao.com/oauth/token",
+            data={
+                "grant_type":   "authorization_code",
+                "client_id":    KAKAO_REST_KEY,
+                "redirect_uri": REDIRECT_URI,
+                "code":         code,
+            },
+            timeout=10,
+        )
+        return r.status_code, r.json()
+    except Exception as e:
+        return 0, {"error": "network", "error_description": str(e)}
+
+
+def _refresh_kakao_token(refresh_token: str) -> tuple[int, dict]:
+    try:
+        r = requests.post(
+            "https://kauth.kakao.com/oauth/token",
+            data={
+                "grant_type":    "refresh_token",
+                "client_id":     KAKAO_REST_KEY,
+                "refresh_token": refresh_token,
+            },
+            timeout=10,
+        )
+        return r.status_code, r.json()
+    except Exception as e:
+        return 0, {"error": "network", "error_description": str(e)}
+
 
 def _save_kakao_token(token_data: dict):
-    """카카오 토큰 쿠키에 저장"""
+    """카카오 토큰 쿠키에 저장 (30일)"""
     if _ctrl is not None:
         try:
-            _ctrl.set('kakao_token', json.dumps(token_data, ensure_ascii=False),
-                      max_age=60 * 60 * 24 * 30)   # 30일
+            _ctrl.set(
+                'kakao_token',
+                json.dumps(token_data, ensure_ascii=False),
+                max_age=60 * 60 * 24 * 30,
+            )
         except Exception:
             pass
+
 
 def _clear_kakao_token():
     """카카오 토큰 초기화"""
     st.session_state['kakao_token'] = None
+    st.session_state.pop('_kakao_used_code', None)
     if _ctrl is not None:
         try:
             _ctrl.remove('kakao_token')
         except Exception:
             pass
 
+
 def init_kakao():
-    """앱 시작 시 쿠키에서 카카오 토큰 로드"""
-    if 'kakao_token'  not in st.session_state:
+    """앱 시작 시 카카오 토큰 초기화.
+    우선순위: ① Secrets 직접 토큰 ② 쿠키 저장 토큰 ③ 없음
+    """
+    if 'kakao_token' not in st.session_state:
         st.session_state['kakao_token'] = None
-    if 'kakao_loaded' not in st.session_state:
-        st.session_state['kakao_loaded'] = False
 
-    if not st.session_state['kakao_loaded']:
-        if _ctrl is not None:
-            try:
-                raw = _ctrl.get('kakao_token')
-                if raw:
-                    token_data = json.loads(raw) if isinstance(raw, str) else raw
-                    if token_data and isinstance(token_data, dict):
-                        st.session_state['kakao_token'] = token_data
-            except Exception:
-                pass
-        st.session_state['kakao_loaded'] = True
-
-def handle_kakao_callback():
-    """URL에 ?code= 가 있으면 토큰 교환 처리"""
-    params = st.query_params
-    if 'code' not in params:
+    # 이미 토큰 있으면 스킵
+    if st.session_state['kakao_token']:
         return
 
-    code = params['code']
+    # ① Secrets에 액세스 토큰이 직접 있으면 그걸 사용
+    if _KAKAO_STATIC_TOKEN:
+        st.session_state['kakao_token'] = {
+            'access_token':  _KAKAO_STATIC_TOKEN,
+            'refresh_token': st.secrets.get("kakao_refresh_token", ""),
+            'expires_at':    int(time.time()) + 86400 * 30,  # 정적 토큰은 장기로 처리
+            'static':        True,
+        }
+        return
+
+    # ② 쿠키에서 로드 (한 세션에 한 번만)
+    if st.session_state.get('_kakao_cookie_loaded'):
+        return
+    st.session_state['_kakao_cookie_loaded'] = True
+    if _ctrl is not None:
+        try:
+            raw = _ctrl.get('kakao_token')
+            if raw:
+                token_data = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(token_data, dict) and token_data.get('access_token'):
+                    st.session_state['kakao_token'] = token_data
+        except Exception:
+            pass
+
+
+def handle_kakao_callback():
+    """URL ?code= 파라미터 처리.
+
+    버그 수정 포인트:
+    - st.query_params.clear() 가 rerun을 트리거하므로
+      성공/실패 메시지를 session_state 에 저장 → 다음 render에서 표시
+    - _kakao_used_code 로 같은 code 중복 처리 방지 (Kakao code 1회용)
+    - error 파라미터(사용자 로그인 거부 등)도 처리
+    """
+    params = st.query_params.to_dict()
+
+    # 카카오가 error 파라미터를 보낸 경우 (로그인 거부 등)
+    if 'error' in params:
+        st.query_params.clear()
+        desc = params.get('error_description', params['error'])
+        st.session_state['_kakao_notify'] = ('error', f"카카오 로그인 거부: {desc}")
+        return
+
+    code = params.get('code')
+    if not code:
+        return
+
+    # 이미 처리한 code 면 스킵 (rerun 루프 방지)
+    if st.session_state.get('_kakao_used_code') == code:
+        st.query_params.clear()
+        return
+    st.session_state['_kakao_used_code'] = code
+
+    # 토큰 교환
     status, result = _exchange_kakao_code(code)
+
+    # query_params 클리어 → rerun 트리거 (이후 session_state 메시지가 표시됨)
     st.query_params.clear()
 
-    if status == 200 and 'access_token' in result:
+    if status == 200 and result.get('access_token'):
         token_data = {
             'access_token':  result['access_token'],
             'refresh_token': result.get('refresh_token', ''),
             'expires_at':    int(time.time()) + result.get('expires_in', 21600),
+            'static':        False,
         }
-        st.session_state['kakao_token']  = token_data
-        st.session_state['kakao_loaded'] = True
+        st.session_state['kakao_token']          = token_data
+        st.session_state['_kakao_cookie_loaded'] = True
         _save_kakao_token(token_data)
-        st.toast("✅ 카카오톡 연결 완료! 분석 결과를 카카오로 받을 수 있어요.", icon="🎉")
+        st.session_state['_kakao_notify'] = ('success', '✅ 카카오톡 연결 완료!')
     else:
-        st.error(f"카카오 로그인 실패: {result.get('error_description', result)}")
+        err  = result.get('error_description') or result.get('msg') or result.get('error') or '알 수 없는 오류'
+        debug = f"HTTP {status} | {json.dumps(result, ensure_ascii=False)[:200]}"
+        st.session_state['_kakao_notify'] = ('error', f"토큰 교환 실패: {err}")
+        st.session_state['_kakao_debug']  = debug
+
+
+def _apply_manual_kakao_token(raw_token: str):
+    """수동 입력 액세스 토큰 적용"""
+    raw_token = raw_token.strip()
+    if not raw_token:
+        return False
+    # 실제 API 호출로 유효성 검증
+    try:
+        r = requests.get(
+            "https://kapi.kakao.com/v1/user/access_token_info",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            info = r.json()
+            token_data = {
+                'access_token':  raw_token,
+                'refresh_token': '',
+                'expires_at':    int(time.time()) + info.get('expires_in', 21600),
+                'static':        True,
+            }
+            st.session_state['kakao_token']          = token_data
+            st.session_state['_kakao_cookie_loaded'] = True
+            _save_kakao_token(token_data)
+            return True
+        return False
+    except Exception:
+        return False
+
 
 def get_valid_kakao_token() -> str | None:
     """유효한 액세스 토큰 반환 (만료 시 자동 갱신)"""
@@ -363,18 +466,22 @@ def get_valid_kakao_token() -> str | None:
     if not token_data:
         return None
 
-    # 만료 5분 전이면 갱신
+    # 정적 토큰(Secrets/수동 입력)은 갱신 로직 건너뜀
+    if token_data.get('static'):
+        return token_data.get('access_token')
+
+    # 만료 5분 전이면 refresh
     if time.time() > token_data.get('expires_at', 0) - 300:
-        refresh = token_data.get('refresh_token')
+        refresh = token_data.get('refresh_token', '')
         if not refresh:
             _clear_kakao_token()
             return None
 
         status, result = _refresh_kakao_token(refresh)
-        if status == 200:
+        if status == 200 and result.get('access_token'):
             token_data['access_token'] = result['access_token']
             token_data['expires_at']   = int(time.time()) + result.get('expires_in', 21600)
-            if 'refresh_token' in result:
+            if result.get('refresh_token'):
                 token_data['refresh_token'] = result['refresh_token']
             st.session_state['kakao_token'] = token_data
             _save_kakao_token(token_data)
@@ -737,27 +844,94 @@ def render_sidebar():
 
         # ── 카카오톡 연결 ─────────────────────────────────────
         st.divider()
-        st.markdown("### 📱 카카오톡 알림")
-        kakao_token = st.session_state.get('kakao_token')
-        if kakao_token:
-            st.success("✅ 카카오 연결됨")
-            if st.button("연결 해제", key="kakao_disconnect", use_container_width=True):
-                _clear_kakao_token(); st.rerun()
-        else:
-            if KAKAO_REST_KEY:
-                url = kakao_auth_url()
-                st.markdown(
-                    f'<a href="{url}" target="_top" style="'
-                    'display:block;text-align:center;text-decoration:none;'
-                    'background:#FEE500;border-radius:8px;padding:10px 0;'
-                    'font-weight:700;font-size:14px;color:#191919;cursor:pointer;'
-                    'margin:4px 0">'
-                    '🔗 카카오 로그인</a>',
-                    unsafe_allow_html=True,
-                )
-                st.caption("위 버튼 클릭 → 카카오 로그인 → 앱 자동 복귀")
+        st.markdown("### 📱 카카오톡")
+
+        # ① 알림 메시지 표시 (handle_kakao_callback 에서 저장한 것)
+        if notify := st.session_state.pop('_kakao_notify', None):
+            kind, msg = notify
+            if kind == 'success':
+                st.success(msg)
             else:
-                st.warning("Secrets에 kakao_rest_key를\n설정해주세요")
+                st.error(msg)
+                if debug := st.session_state.pop('_kakao_debug', None):
+                    with st.expander("🔍 오류 상세"):
+                        st.code(debug, language=None)
+                        st.caption("이 내용을 캡처해서 공유해주세요")
+
+        kakao_token = st.session_state.get('kakao_token')
+
+        if kakao_token:
+            # ── 연결된 상태 ──────────────────────────────────
+            is_static = kakao_token.get('static', False)
+            exp_at    = kakao_token.get('expires_at', 0)
+            exp_str   = (time.strftime('%m/%d %H:%M', time.localtime(exp_at))
+                         if exp_at else '알 수 없음')
+            src_label = 'Secrets/수동' if is_static else 'OAuth'
+            st.success(f"✅ 카카오 연결됨 ({src_label})")
+            st.caption(f"만료: {exp_str}")
+
+            tc1, tc2 = st.columns(2)
+            with tc1:
+                if st.button("🔔 테스트 전송", key="kakao_test",
+                             use_container_width=True):
+                    tok = get_valid_kakao_token()
+                    if tok:
+                        ok, res = send_kakao_message(
+                            tok, "📈 주식 분석기 연결 테스트\n카카오톡 전송이 정상 작동합니다! ✅")
+                        if ok:
+                            st.toast("테스트 메시지 전송 완료! ✅", icon="📱")
+                        else:
+                            st.error(f"전송 실패: {res.get('msg', res)}")
+                    else:
+                        st.warning("토큰 만료")
+            with tc2:
+                if st.button("연결 해제", key="kakao_disconnect",
+                             use_container_width=True):
+                    _clear_kakao_token(); st.rerun()
+        else:
+            # ── 미연결 상태 ──────────────────────────────────
+            if not KAKAO_REST_KEY and not _KAKAO_STATIC_TOKEN:
+                st.warning("Secrets에 `kakao_rest_key` 또는\n`kakao_access_token`을 설정하세요")
+            else:
+                # OAuth 로그인 버튼
+                if KAKAO_REST_KEY:
+                    url = kakao_auth_url()
+                    st.markdown(
+                        f'<a href="{url}" target="_top" style="'
+                        'display:block;text-align:center;text-decoration:none;'
+                        'background:#FEE500;border-radius:8px;padding:10px 0;'
+                        'font-weight:700;font-size:14px;color:#191919;cursor:pointer;'
+                        'margin:4px 0">'
+                        '🔗 카카오 로그인 (OAuth)</a>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("버튼 클릭 → 카카오 로그인 → 앱 자동 복귀")
+
+                # 수동 토큰 입력 (OAuth가 안 될 때 대안)
+                with st.expander("🔑 토큰 직접 입력 (OAuth 안 될 때)"):
+                    st.caption(
+                        "카카오 개발자 콘솔 → 내 앱 → **도구 > REST API 테스트**\n"
+                        "또는 https://developers.kakao.com/tool/rest-api/open/get/v1-user-me\n"
+                        "에서 액세스 토큰 발급 후 붙여넣기"
+                    )
+                    manual_tok = st.text_input(
+                        "액세스 토큰", type="password",
+                        placeholder="액세스 토큰을 붙여넣으세요",
+                        key="kakao_manual_token_input",
+                    )
+                    if st.button("✅ 토큰 적용", key="kakao_manual_apply",
+                                 use_container_width=True):
+                        if manual_tok:
+                            with st.spinner("토큰 유효성 확인 중..."):
+                                ok = _apply_manual_kakao_token(manual_tok)
+                            if ok:
+                                st.session_state['_kakao_notify'] = (
+                                    'success', '✅ 수동 토큰 연결 완료!')
+                                st.rerun()
+                            else:
+                                st.error("토큰이 유효하지 않아요. 다시 발급해주세요.")
+                        else:
+                            st.warning("토큰을 입력해주세요.")
 
         # ── KIS API 연결 상태 ─────────────────────────────────────
         st.divider()
