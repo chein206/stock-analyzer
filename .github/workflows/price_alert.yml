@@ -1,0 +1,45 @@
+name: 주가 알림 체크
+
+# 평일 9:00~15:30 KST (UTC 00:00~06:30) 15분마다 실행
+on:
+  schedule:
+    - cron: '0,15,30,45 0-6 * * 1-5'   # UTC 0~6시 = KST 9~15시
+    - cron: '0,15,30 7 * * 1-5'         # UTC 7:00, 7:15, 7:30 = KST 16:00, 16:15, 16:30 (장 마감 직전)
+  workflow_dispatch:                      # 수동 실행 (테스트용)
+
+permissions:
+  contents: write   # 알림 상태 파일 커밋용
+
+jobs:
+  check-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 패키지 설치
+        run: |
+          pip install --quiet requests FinanceDataReader pandas pytz yfinance
+
+      - name: 알림 체크 실행
+        env:
+          KAKAO_ACCESS_TOKEN: ${{ secrets.KAKAO_ACCESS_TOKEN }}
+        run: python scripts/check_alerts.py
+
+      - name: 알림 상태 커밋 (변경 시에만)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/price_alerts.json
+          git diff --staged --quiet && echo "변경 없음" || (
+            git commit -m "chore: update alert trigger state [skip ci]" &&
+            git push
+          )
