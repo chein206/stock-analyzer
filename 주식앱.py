@@ -980,22 +980,49 @@ def calc_indicators(df):
 
 
 def calc_zones(df, info):
-    last = df['Close'].iloc[-1]
-    bb_lower = df['BB_lower'].iloc[-1]; bb_upper = df['BB_upper'].iloc[-1]
-    ma20 = df['MA20'].iloc[-1]; rsi = df['RSI'].iloc[-1]
+    last     = df['Close'].iloc[-1]
+    bb_lower = df['BB_lower'].iloc[-1]
+    bb_upper = df['BB_upper'].iloc[-1]
+    ma20     = df['MA20'].iloc[-1]
+    ma60     = df['MA60'].iloc[-1]
+    rsi      = df['RSI'].iloc[-1]
     w52_low  = info.get('52w_low')  or df['Low'].min()
     w52_high = info.get('52w_high') or df['High'].max()
-    buy_low = max(bb_lower, w52_low * 1.03)
+
+    # ── 매수 구간 ──────────────────────────────────────────────────────
+    buy_low  = max(bb_lower, w52_low * 1.03)
     buy_high = min(ma20, last * 0.99)
-    if buy_high <= buy_low: buy_high = buy_low * 1.05
+    if buy_high <= buy_low:
+        buy_high = buy_low * 1.05
     buy_mid = (buy_low + buy_high) / 2
-    stop = round(buy_mid * 0.93 / 100) * 100
-    tgt1 = round(bb_upper / 100) * 100
-    tgt2 = round(w52_high * 0.97 / 100) * 100
-    risk = buy_mid - stop
-    rr   = round((tgt1 - buy_mid) / risk, 1) if risk > 0 else 0
+    stop    = round(buy_mid * 0.93 / 100) * 100
+
+    # ── 목표가 — 반드시 현재가 위에 설정 ─────────────────────────────
+    # 1차: 볼린저 상단 vs 현재가 +8% 중 높은 값
+    tgt1_raw = round(bb_upper / 100) * 100
+    tgt1     = max(tgt1_raw, round(last * 1.08 / 100) * 100)
+
+    # 2차: 52주 고점 97% vs 현재가 +15% 중 높은 값
+    tgt2_raw = round(w52_high * 0.97 / 100) * 100
+    tgt2     = max(tgt2_raw, round(last * 1.15 / 100) * 100)
+
+    # tgt2 는 tgt1 보다 반드시 위에
+    if tgt2 <= tgt1:
+        tgt2 = round(tgt1 * 1.07 / 100) * 100
+
+    # 현재가가 이미 볼린저 상단을 넘었는지 플래그
+    above_bb_upper = last > bb_upper
+
+    # ── R:R ─────────────────────────────────────────────────────────
+    # 현재가가 매수구간 위면 현재가를 기준 진입가로 사용 (보수적 계산)
+    entry_ref = max(buy_mid, last)
+    risk = entry_ref - stop
+    rr   = round((tgt1 - entry_ref) / risk, 1) if risk > 0 and tgt1 > entry_ref else 0
+
+    # ── 52주 위치, 등락 ──────────────────────────────────────────────
     pos_pct = (last - w52_low) / (w52_high - w52_low) * 100 if w52_high != w52_low else 50
     day_chg = (last / df['Close'].iloc[-2] - 1) * 100 if len(df) > 1 else 0.0
+
     return {
         'last': last, 'day_chg': day_chg,
         'buy_low':  round(buy_low  / 100) * 100,
@@ -1004,7 +1031,9 @@ def calc_zones(df, info):
         'stop': stop, 'tgt1': tgt1, 'tgt2': tgt2, 'rr': rr,
         'rsi': round(rsi, 1) if not np.isnan(rsi) else None,
         'pos_pct': round(pos_pct, 1), 'w52_low': w52_low, 'w52_high': w52_high,
-        'ma20': ma20, 'ma60': df['MA60'].iloc[-1],
+        'ma20': ma20, 'ma60': ma60,
+        'above_bb_upper': above_bb_upper,   # 신규: 볼린저 상단 돌파 여부
+        'tgt1_raw': tgt1_raw,               # 신규: 원래 BB 기반 목표가 (참고용)
     }
 
 
@@ -1027,6 +1056,7 @@ def calc_signal(df, z, flow_df=None):
 
     if   bb_pct < 0.10: score += 20; reasons.append(('pos', '볼린저밴드 하단 근처 — 기술적 저점'))
     elif bb_pct < 0.35: score += 10; reasons.append(('pos', '볼린저밴드 하단~중간 — 매수 고려 구간'))
+    elif bb_pct > 1.0:  score -= 28; reasons.append(('neg', '볼린저밴드 상단 돌파 — 추격 매수 고위험 구간'))
     elif bb_pct > 0.90: score -= 20; reasons.append(('neg', '볼린저밴드 상단 근처 — 단기 고점 주의'))
     elif bb_pct > 0.70: score -= 8
 
@@ -1136,10 +1166,20 @@ def build_signal_detail(z: dict, sig: dict, df) -> str:
     )
 
     # ── 액션 문장 ─────────────────────────────────────────────────
+    above_bb  = z.get('above_bb_upper', False)
+    tgt1_raw  = z.get('tgt1_raw', tgt1)
     dist_to_buy = (last - buy_high) / buy_high * 100  # 양수=매수구간 위, 음수=이미 진입
     dist_pct    = abs(dist_to_buy)
 
-    if score >= 65:
+    # 볼린저 상단 돌파 케이스 — 가장 먼저 체크
+    if above_bb and last > tgt1_raw:
+        over_pct = round((last - tgt1_raw) / tgt1_raw * 100, 1)
+        pullback = round(tgt1_raw / 100) * 100
+        action = (f"볼린저 상단(<b>{int(tgt1_raw):,}원</b>)을 <b>{over_pct}%</b> 초과한 강세 구간이에요. "
+                  f"보유 중이라면 <b>분할 익절</b>(현재 +{over_pct}%)을 고려하고, "
+                  f"신규 매수는 <b>{int(pullback):,}원</b> 부근 눌림목을 기다리세요. "
+                  f"상단 돌파 직후 추격 매수는 고위험입니다.")
+    elif score >= 65:
         if last <= buy_high:
             action = (f"현재가 <b>{int(last):,}원</b>이 매수 구간 "
                       f"<b>{int(buy_low):,}~{int(buy_high):,}원</b> 안에 있어요. "
@@ -1148,7 +1188,7 @@ def build_signal_detail(z: dict, sig: dict, df) -> str:
             action = (f"매수 구간 <b>{int(buy_low):,}~{int(buy_high):,}원</b>보다 "
                       f"<b>{dist_pct:.1f}%</b> 위에 있어요. 소폭 눌림목 후 진입 고려.")
         else:
-            action = (f"현재가 <b>{int(last):,}원</b>가 매수 구간 <b>{int(buy_high):,}원</b>보다 "
+            action = (f"현재가 <b>{int(last):,}원</b>이 매수 구간 <b>{int(buy_high):,}원</b>보다 "
                       f"<b>{dist_pct:.1f}%</b> 높아요. 충분한 눌림목 후 분할 진입 전략 권장.")
     elif score >= 45:
         action = (f"뚜렷한 방향성이 없어요. MA20 <b>{int(ma20):,}원</b> · MA60 <b>{int(ma60):,}원</b> "
@@ -1321,11 +1361,23 @@ def _render_top5(top5: list, regime: dict):
 
 
 def price_position(last, z):
-    if last < z['stop']:     return ('🔴', '손절 구간 아래입니다 — 보유 중이라면 손절 고려',              '#FEF0F0', '#E24B4A')
-    if last <= z['buy_low']: return ('🎯', '매수 구간에 접근 중 — 분할 매수 고려',                       '#E8F8F2', '#1D9E75')
-    if last <= z['buy_high']:return ('✅', '현재가가 매수 구간 안에 있습니다!',                            '#E8F8F2', '#1D9E75')
-    if last <= z['tgt1']:    return ('🟡', '매수 구간보다 높습니다 — 눌림목(하락 후 반등) 기다리세요',     '#FFF8E8', '#D4870E')
-    return                          ('🏆', '단기 목표가 도달 구간 — 보유 중이라면 분할 익절 고려',         '#FFF9E6', '#B8860B')
+    above_bb = z.get('above_bb_upper', False)
+    tgt1_raw = z.get('tgt1_raw', z['tgt1'])
+
+    if last < z['stop']:
+        return ('🔴', '손절 구간 아래입니다 — 보유 중이라면 손절 고려',              '#FEF0F0', '#E24B4A')
+    if last <= z['buy_low']:
+        return ('🎯', '매수 구간에 접근 중 — 분할 매수 고려',                        '#E8F8F2', '#1D9E75')
+    if last <= z['buy_high']:
+        return ('✅', '현재가가 매수 구간 안에 있습니다!',                             '#E8F8F2', '#1D9E75')
+    if above_bb and last > tgt1_raw:
+        # 볼린저 상단 돌파 → 기존 목표가 이미 넘어선 상태
+        over_pct = round((last - tgt1_raw) / tgt1_raw * 100, 1)
+        return ('🔥', f'볼린저 상단을 {over_pct}% 돌파 중 — 보유자는 분할 익절, 신규 매수는 눌림목 대기',
+                '#FFF3E0', '#E65100')
+    if last <= z['tgt1']:
+        return ('🟡', '매수 구간보다 높습니다 — 눌림목(하락 후 반등) 기다리세요',      '#FFF8E8', '#D4870E')
+    return     ('🏆', '단기 목표가 도달 구간 — 보유 중이라면 분할 익절 고려',          '#FFF9E6', '#B8860B')
 
 
 def find_sr(df, n=5):
@@ -1915,11 +1967,14 @@ def render_analysis(code, name, months):
     t1p = round((z['tgt1'] - z['buy_mid']) / z['buy_mid'] * 100, 1)
     t2p = round((z['tgt2'] - z['buy_mid']) / z['buy_mid'] * 100, 1)
     with c3:
+        above_bb = z.get('above_bb_upper', False)
+        tgt1_sub = "볼린저 상단 돌파 중 🔥" if above_bb else "볼린저 상단"
+        tgt1_col = '#E65100' if above_bb else '#534AB7'
         st.markdown(
-            f"<div class='zone-card' style='border-top:4px solid #534AB7'>"
+            f"<div class='zone-card' style='border-top:4px solid {tgt1_col}'>"
             f"<div class='zone-label'>🎯 단기 목표가</div>"
-            f"<div class='zone-value' style='color:#534AB7'>{int(z['tgt1']):,}원</div>"
-            f"<div class='zone-sub'>매수가 대비 +{t1p:.1f}% · 볼린저 상단</div></div>",
+            f"<div class='zone-value' style='color:{tgt1_col}'>{int(z['tgt1']):,}원</div>"
+            f"<div class='zone-sub'>매수가 대비 +{t1p:.1f}% · {tgt1_sub}</div></div>",
             unsafe_allow_html=True)
     with c4:
         st.markdown(
