@@ -739,25 +739,33 @@ def search_stocks(krx, query):
 
 # ── 관심종목 (쿠키 기반) ──────────────────────────────────────────────────────
 def init_watchlist():
-    """쿠키에서 관심종목 불러오기"""
-    if 'watchlist'  not in st.session_state: st.session_state.watchlist  = []
-    if 'wl_loaded'  not in st.session_state: st.session_state.wl_loaded  = False
+    """쿠키 → GitHub 순서로 관심종목 불러오기"""
+    if 'watchlist' not in st.session_state: st.session_state.watchlist = []
+    if 'wl_loaded' not in st.session_state: st.session_state.wl_loaded = False
 
     if not st.session_state.wl_loaded:
+        loaded = []
+        # 1) 쿠키 우선
         if _ctrl is not None:
             try:
                 raw = _ctrl.get('kr_watchlist')
                 if raw:
-                    loaded = json.loads(raw) if isinstance(raw, str) else raw
-                    if isinstance(loaded, list):
-                        st.session_state.watchlist = loaded
+                    parsed = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(parsed, list):
+                        loaded = parsed
             except Exception:
                 pass
+        # 2) 쿠키 없으면 GitHub 로드
+        if not loaded:
+            loaded = _load_watchlist_from_github()
+        if loaded:
+            st.session_state.watchlist = loaded
         st.session_state.wl_loaded = True
 
 
 def _save_watchlist():
-    """관심종목 쿠키에 저장 (1년 유지)"""
+    """관심종목 쿠키 + GitHub 동기화"""
+    # 쿠키 저장
     if _ctrl is not None:
         try:
             _ctrl.set(
@@ -767,6 +775,8 @@ def _save_watchlist():
             )
         except Exception:
             pass
+    # GitHub 동기화 (PAT 있을 때만)
+    _sync_watchlist_to_github(st.session_state.watchlist)
 
 def add_to_watchlist(code, name):
     if not any(i['code'] == code for i in st.session_state.watchlist):
@@ -827,66 +837,98 @@ def get_quick_price(code: str) -> dict | None:
 
 
 # ── 가격 알림 ────────────────────────────────────────────────────────────────
-_GH_OWNER = "chein206"
-_GH_REPO  = "stock-analyzer"
+_GH_OWNER       = "chein206"
+_GH_REPO        = "stock-analyzer"
 _GH_ALERTS_PATH = "data/price_alerts.json"
+_GH_WL_PATH     = "data/watchlist.json"
 
 
-def _sync_alerts_to_github(alerts: dict) -> bool:
-    """알림 설정을 GitHub 레포 파일에 동기화.
-    Secrets에 github_pat 있을 때만 동작 (없으면 session_state 전용).
-    """
-    import base64
-    pat = st.secrets.get("github_pat", "")
-    if not pat:
-        return False
+def _gh_get_sha(path: str, pat: str) -> str:
+    """GitHub 파일 SHA 조회 (업데이트에 필요)"""
     try:
-        payload_str = json.dumps(
-            {"alerts": alerts, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+09:00")},
-            ensure_ascii=False, indent=2
+        r = requests.get(
+            f"https://api.github.com/repos/{_GH_OWNER}/{_GH_REPO}/contents/{path}",
+            headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"},
+            timeout=5,
         )
-        b64 = base64.b64encode(payload_str.encode("utf-8")).decode()
-        api_url = (f"https://api.github.com/repos/{_GH_OWNER}/{_GH_REPO}"
-                   f"/contents/{_GH_ALERTS_PATH}")
-        headers = {
-            "Authorization": f"token {pat}",
-            "Accept": "application/vnd.github.v3+json",
-        }
-        # 현재 파일 SHA 조회 (업데이트에 필요)
-        r = requests.get(api_url, headers=headers, timeout=5)
-        sha = r.json().get("sha", "") if r.status_code == 200 else ""
+        return r.json().get("sha", "") if r.status_code == 200 else ""
+    except Exception:
+        return ""
 
-        body = {"message": "update price alerts [skip ci]", "content": b64}
+
+def _gh_put_file(path: str, pat: str, content_dict: dict) -> bool:
+    """GitHub 파일 생성/업데이트"""
+    import base64
+    try:
+        payload_str = json.dumps(content_dict, ensure_ascii=False, indent=2)
+        b64  = base64.b64encode(payload_str.encode("utf-8")).decode()
+        sha  = _gh_get_sha(path, pat)
+        body = {"message": f"update {path} [skip ci]", "content": b64}
         if sha:
             body["sha"] = sha
-        r2 = requests.put(api_url, headers=headers, json=body, timeout=10)
-        return r2.status_code in (200, 201)
+        r = requests.put(
+            f"https://api.github.com/repos/{_GH_OWNER}/{_GH_REPO}/contents/{path}",
+            headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"},
+            json=body, timeout=10,
+        )
+        return r.status_code in (200, 201)
     except Exception:
         return False
 
 
-def _load_alerts_from_github() -> dict:
-    """GitHub 레포 파일에서 알림 설정 로드 (초기 1회)."""
+def _gh_get_file(path: str, pat: str) -> dict | None:
+    """GitHub 파일 JSON 로드"""
     import base64
-    pat = st.secrets.get("github_pat", "")
-    if not pat:
-        return {}
     try:
-        api_url = (f"https://api.github.com/repos/{_GH_OWNER}/{_GH_REPO}"
-                   f"/contents/{_GH_ALERTS_PATH}")
         r = requests.get(
-            api_url,
-            headers={"Authorization": f"token {pat}",
-                     "Accept": "application/vnd.github.v3+json"},
+            f"https://api.github.com/repos/{_GH_OWNER}/{_GH_REPO}/contents/{path}",
+            headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"},
             timeout=5,
         )
         if r.status_code == 200:
             content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
-            return json.loads(content).get("alerts", {})
+            return json.loads(content)
     except Exception:
         pass
-    return {}
+    return None
 
+
+# ── 관심종목 GitHub 동기화 ─────────────────────────────────────────────────────
+def _sync_watchlist_to_github(watchlist: list) -> bool:
+    pat = st.secrets.get("github_pat", "")
+    if not pat:
+        return False
+    return _gh_put_file(_GH_WL_PATH, pat, {
+        "watchlist": watchlist,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+    })
+
+
+def _load_watchlist_from_github() -> list:
+    pat = st.secrets.get("github_pat", "")
+    if not pat:
+        return []
+    data = _gh_get_file(_GH_WL_PATH, pat)
+    return data.get("watchlist", []) if data else []
+
+
+# ── 알림 GitHub 동기화 ────────────────────────────────────────────────────────
+def _sync_alerts_to_github(alerts: dict) -> bool:
+    pat = st.secrets.get("github_pat", "")
+    if not pat:
+        return False
+    return _gh_put_file(_GH_ALERTS_PATH, pat, {
+        "alerts": alerts,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+    })
+
+
+def _load_alerts_from_github() -> dict:
+    pat = st.secrets.get("github_pat", "")
+    if not pat:
+        return {}
+    data = _gh_get_file(_GH_ALERTS_PATH, pat)
+    return data.get("alerts", {}) if data else {}
 
 def _check_price_alerts():
     """관심종목 알림 가격 도달 여부 체크 — 30초마다 호출."""
@@ -1000,41 +1042,39 @@ def render_sidebar():
                         remove_from_watchlist(code)
                         st.rerun()
 
-                # ── 🔔 알림 설정 (종목별) ─────────────────────
+                # ── 🔔 알림 설정 (종목별, 컴팩트) ────────────────
                 _al = st.session_state['price_alerts'].get(code, {})
-                with st.expander(f"🔔 알림 설정", expanded=False):
-                    _default_tgt = float(_al.get('target') or (price * 1.10 if price else 0))
-                    _default_stp = float(_al.get('stop')   or (price * 0.93 if price else 0))
-                    _tgt = st.number_input(
-                        "목표가 (원)", min_value=0, value=int(_default_tgt),
-                        step=100, key=f"al_tgt_{code}")
-                    _stp = st.number_input(
-                        "손절가 (원)", min_value=0, value=int(_default_stp),
-                        step=100, key=f"al_stp_{code}")
-                    col_save, col_del = st.columns(2)
-                    with col_save:
-                        if st.button("💾 저장", key=f"al_save_{code}", use_container_width=True):
+                _al_label = "🔔" if not _al else "🔔✅"
+                with st.expander(_al_label, expanded=False):
+                    _c1, _c2 = st.columns(2)
+                    with _c1:
+                        _tgt = st.number_input(
+                            "🎯목표", min_value=0,
+                            value=int(_al.get('target') or (price * 1.10 if price else 0)),
+                            step=100, key=f"al_tgt_{code}", label_visibility="collapsed",
+                            placeholder="목표가")
+                    with _c2:
+                        _stp = st.number_input(
+                            "🛑손절", min_value=0,
+                            value=int(_al.get('stop') or (price * 0.93 if price else 0)),
+                            step=100, key=f"al_stp_{code}", label_visibility="collapsed",
+                            placeholder="손절가")
+                    st.caption(f"🎯목표가   🛑손절가")
+                    _b1, _b2 = st.columns(2)
+                    with _b1:
+                        if st.button("저장", key=f"al_save_{code}", use_container_width=True):
                             st.session_state['price_alerts'][code] = {
                                 'target': float(_tgt) if _tgt > 0 else None,
                                 'stop':   float(_stp) if _stp > 0 else None,
-                                'name':   name,
-                                'enabled': True,
-                                'last_triggered': '',
+                                'name':   name, 'enabled': True, 'last_triggered': '',
                             }
                             synced = _sync_alerts_to_github(st.session_state['price_alerts'])
-                            if synced:
-                                st.toast(f"✅ {name} 알림 저장 + GitHub 동기화 완료", icon="🔔")
-                            else:
-                                st.toast(f"✅ {name} 알림 저장됨 (앱 켜진 동안만)", icon="🔔")
-                    with col_del:
-                        if st.button("🗑 삭제", key=f"al_del_{code}", use_container_width=True):
+                            st.toast(f"🔔 {name} 알림 저장{'+동기화' if synced else ''}", icon="✅")
+                    with _b2:
+                        if st.button("삭제", key=f"al_del_{code}", use_container_width=True):
                             st.session_state['price_alerts'].pop(code, None)
                             _sync_alerts_to_github(st.session_state['price_alerts'])
                             st.rerun()
-                    if _al:
-                        tgt_disp = f"{int(_al['target']):,}원" if _al.get('target') else '-'
-                        stp_disp = f"{int(_al['stop']):,}원"   if _al.get('stop')   else '-'
-                        st.caption(f"현재 설정: 목표 {tgt_disp} / 손절 {stp_disp}")
 
         # ── 카카오톡 연결 ─────────────────────────────────────
         st.divider()
