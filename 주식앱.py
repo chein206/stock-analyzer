@@ -745,40 +745,58 @@ def load_krx_stocks():
     return result
 
 
+def _naver_search(query: str) -> pd.DataFrame:
+    """네이버 금융 자동완성 API로 종목 검색 (KRX 목록 없어도 작동)."""
+    try:
+        import urllib.parse
+        url = (f"https://ac.finance.naver.com/ac"
+               f"?q={urllib.parse.quote(query)}&q_enc=UTF-8&target=stock")
+        r = requests.get(url, timeout=5,
+                         headers={"User-Agent": "Mozilla/5.0",
+                                  "Referer": "https://finance.naver.com"})
+        if r.status_code != 200:
+            return pd.DataFrame(columns=['Code', 'Name'])
+        data = r.json()
+        # 응답 형식: {"items": [[code, name, ...], ...]}
+        items = data.get("items", [])
+        if not items:
+            # 다른 형식 시도: {"result": {"items": [...]}}
+            items = data.get("result", {}).get("items", [])
+        rows = []
+        for item in items[:12]:
+            if isinstance(item, list) and len(item) >= 2:
+                code = str(item[0]).zfill(6)
+                name = str(item[1])
+                rows.append({'Code': code, 'Name': name})
+            elif isinstance(item, dict):
+                code = str(item.get('code', item.get('cd', ''))).zfill(6)
+                name = str(item.get('name', item.get('nm', '')))
+                if code and name:
+                    rows.append({'Code': code, 'Name': name})
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['Code', 'Name'])
+    except Exception:
+        return pd.DataFrame(columns=['Code', 'Name'])
+
+
 def search_stocks(krx, query):
     q = query.strip()
     if not q:
         return pd.DataFrame(columns=['Code', 'Name'])
 
+    # 1) 로드된 KRX 목록에서 검색
     mask = (krx['Name'].str.contains(q, na=False, case=False, regex=False) |
             krx['Code'].str.contains(q, na=False, regex=False))
     results = krx[mask].head(12)
 
-    # KRX 목록이 작으면(fallback 상태) FDR로 직접 재시도
-    if len(krx) < 500:
-        try:
-            import FinanceDataReader as fdr
-            full = fdr.StockListing('KRX')
-            if full is not None and len(full) > 200:
-                col_map = {}
-                for c in full.columns:
-                    cl = c.lower().strip().replace(' ', '').replace('_', '')
-                    if cl in ('code', 'symbol', '종목코드', 'ticker', 'shortcode'):
-                        col_map[c] = 'Code'
-                    elif cl in ('name', '종목명', '회사명', 'corpname', 'shortname', '기업명'):
-                        col_map[c] = 'Name'
-                full = full.rename(columns=col_map)
-                if 'Code' in full.columns and 'Name' in full.columns:
-                    full['Code'] = full['Code'].astype(str).str.extract(r'(\d{6})')[0]
-                    full = full.dropna(subset=['Code'])
-                    mask2 = (full['Name'].str.contains(q, na=False, case=False, regex=False) |
-                             full['Code'].str.contains(q, na=False, regex=False))
-                    results = full[mask2][['Code', 'Name']].head(12)
-                    # 성공하면 session_state 캐시 갱신
-                    if len(full) > 500:
-                        st.session_state['_krx_cache'] = {'data': full[['Code','Name']], 'ts': time.time()}
-        except Exception:
-            pass
+    # 2) 결과 없거나 KRX 목록이 작으면 → 네이버 금융 API 검색
+    if results.empty or len(krx) < 500:
+        naver = _naver_search(q)
+        if not naver.empty:
+            if results.empty:
+                results = naver
+            else:
+                # 기존 결과에 네이버 결과 합치기 (중복 제거)
+                results = pd.concat([results, naver]).drop_duplicates('Code').head(12)
 
     return results
 
