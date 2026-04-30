@@ -2570,7 +2570,7 @@ def render_analysis(code, name, months):
             "border-radius:4px;padding:2px 7px;margin-left:8px;'>⏱ 지연</span>"
         )
 
-    h_col, btn_col = st.columns([5, 1])
+    h_col, wl_col, kk_col = st.columns([4, 1, 1])
     with h_col:
         st.markdown(
             f"### {name} <span style='color:var(--text-sub);font-size:15px'>({code})</span>"
@@ -2578,18 +2578,19 @@ def render_analysis(code, name, months):
             f"<span style='font-size:30px;font-weight:900'>{int(z['last']):,}원</span>"
             f"&nbsp;<span style='font-size:16px;color:{chg_col}'>{arrow} {abs(z['day_chg']):.2f}%</span>",
             unsafe_allow_html=True)
-    with btn_col:
+    with wl_col:
         st.write("")
         if in_watchlist(code):
-            if st.button("⭐", use_container_width=True, help="관심종목 해제"):
+            if st.button("⭐ 저장됨", use_container_width=True, help="관심종목 해제"):
                 remove_from_watchlist(code); st.rerun()
         else:
-            if st.button("☆", use_container_width=True, help="관심종목 추가"):
+            if st.button("☆ 관심종목", use_container_width=True):
                 add_to_watchlist(code, name); st.rerun()
+    with kk_col:
+        st.write("")
         kakao_token = st.session_state.get('kakao_token')
         if kakao_token:
-            if st.button("📱", use_container_width=True, help="카카오톡 전송",
-                         type="primary"):
+            if st.button("📱 카카오전송", use_container_width=True, type="primary"):
                 access_token = get_valid_kakao_token()
                 if access_token:
                     msg = format_kakao_message(code, name, z, sig)
@@ -2606,7 +2607,7 @@ def render_analysis(code, name, months):
                 else:
                     st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
         else:
-            st.button("📱", use_container_width=True, disabled=True,
+            st.button("📱 카카오전송", use_container_width=True, disabled=True,
                       help="사이드바에서 카카오 로그인 후 사용 가능")
 
     # 신호 박스
@@ -2781,10 +2782,10 @@ def render_analysis(code, name, months):
                         except Exception:
                             pass
 
-    # ── 하단 탭: 차트·수급·실적·뉴스·AI상담 ─────────────────────────────────
+    # ── 하단 탭: 차트·수급·실적·뉴스 ────────────────────────────────────────────
     st.divider()
-    _tab_chart, _tab_flow, _tab_earn, _tab_news, _tab_ai = st.tabs(
-        ["📈 차트", "💰 수급", "📊 실적", "📰 뉴스", "🤖 AI상담"])
+    _tab_chart, _tab_flow, _tab_earn, _tab_news = st.tabs(
+        ["📈 차트", "💰 수급", "📊 실적", "📰 뉴스"])
 
     with _tab_chart:
         st.plotly_chart(build_chart(df, z), use_container_width=True)
@@ -2818,8 +2819,9 @@ def render_analysis(code, name, months):
     with _tab_news:
         render_news_tab(name, code, z, sig)
 
-    with _tab_ai:
-        render_ai_chat(code, name, z, sig)
+    # ── AI 투자 상담 (항상 하단에 표시) ───────────────────────────────────────
+    st.divider()
+    render_ai_chat(code, name, z, sig)
 
     st.divider()
     st.caption("⚠️ **투자 주의사항** — 본 분석은 기술적 지표 기반 참고 정보이며 투자 권유가 아닙니다. 모든 투자 판단과 책임은 투자자 본인에게 있습니다.")
