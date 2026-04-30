@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "interval_hours": 1,
+  "start_hour": 8,
+  "end_hour": 20,
+  "updated_at": null
+}

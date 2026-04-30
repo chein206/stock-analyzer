@@ -739,14 +739,21 @@ def search_stocks(krx, query):
 
 # ── 관심종목 (쿠키 기반) ──────────────────────────────────────────────────────
 def init_watchlist():
-    """쿠키 → GitHub 순서로 관심종목 불러오기"""
+    """GitHub(우선) → 쿠키 순서로 관심종목 불러오기.
+    쿠키는 첫 렌더링 때 비동기로 늦게 읽히므로 GitHub를 1순위로 사용.
+    """
     if 'watchlist' not in st.session_state: st.session_state.watchlist = []
     if 'wl_loaded' not in st.session_state: st.session_state.wl_loaded = False
 
     if not st.session_state.wl_loaded:
         loaded = []
-        # 1) 쿠키 우선
-        if _ctrl is not None:
+        # 1) GitHub 우선 (PAT 있을 때 — 크로스 기기 동기화)
+        try:
+            loaded = _load_watchlist_from_github()
+        except Exception:
+            pass
+        # 2) GitHub 없으면 쿠키 fallback
+        if not loaded and _ctrl is not None:
             try:
                 raw = _ctrl.get('kr_watchlist')
                 if raw:
@@ -755,9 +762,6 @@ def init_watchlist():
                         loaded = parsed
             except Exception:
                 pass
-        # 2) 쿠키 없으면 GitHub 로드
-        if not loaded:
-            loaded = _load_watchlist_from_github()
         if loaded:
             st.session_state.watchlist = loaded
         st.session_state.wl_loaded = True
@@ -1095,6 +1099,62 @@ def render_sidebar():
                                 st.error(f"전송 실패: {res.get('msg', str(res))}")
                         else:
                             st.warning("카카오톡 미연결 — 사이드바에서 연결 후 사용하세요")
+
+        # ── 정기 가격 보고 설정 ───────────────────────────────
+        st.divider()
+        st.markdown("### 🕐 정기 알림")
+        _ns_key = '_notify_settings'
+        if _ns_key not in st.session_state:
+            # GitHub에서 설정 로드
+            _ns_data = _gh_get_file("data/notify_settings.json",
+                                     st.secrets.get("github_pat", "")) or {}
+            st.session_state[_ns_key] = {
+                'enabled':        _ns_data.get('enabled', False),
+                'interval_hours': _ns_data.get('interval_hours', 1),
+                'start_hour':     _ns_data.get('start_hour', 8),
+                'end_hour':       _ns_data.get('end_hour', 20),
+            }
+        _ns = st.session_state[_ns_key]
+
+        _ns_enabled = st.toggle("관심종목 정기 현재가 전송", value=_ns['enabled'],
+                                 key="ns_toggle")
+        if _ns_enabled:
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                _ns_start = st.number_input("시작", min_value=0, max_value=23,
+                                             value=_ns['start_hour'], step=1,
+                                             key="ns_start", format="%d시")
+            with _c2:
+                _ns_end = st.number_input("종료", min_value=0, max_value=23,
+                                           value=_ns['end_hour'], step=1,
+                                           key="ns_end", format="%d시")
+            _ns_interval = st.select_slider(
+                "전송 간격", options=[0.5, 1, 2, 3, 6],
+                value=_ns['interval_hours'], key="ns_interval",
+                format_func=lambda x: f"{'30분' if x==0.5 else f'{int(x)}시간'}")
+            if st.button("💾 저장", key="ns_save", use_container_width=True):
+                new_ns = {
+                    'enabled':        True,
+                    'interval_hours': _ns_interval,
+                    'start_hour':     int(_ns_start),
+                    'end_hour':       int(_ns_end),
+                    'updated_at':     time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+                }
+                st.session_state[_ns_key] = new_ns
+                pat = st.secrets.get("github_pat", "")
+                if pat:
+                    _gh_put_file("data/notify_settings.json", pat, new_ns)
+                    st.toast("✅ 정기 알림 설정 저장됨", icon="🕐")
+                else:
+                    st.warning("github_pat 없음 — 앱 재시작 시 초기화됩니다")
+        else:
+            if _ns['enabled']:  # 꺼진 경우 저장
+                new_ns = {**_ns, 'enabled': False,
+                          'updated_at': time.strftime("%Y-%m-%dT%H:%M:%S+09:00")}
+                st.session_state[_ns_key] = new_ns
+                pat = st.secrets.get("github_pat", "")
+                if pat:
+                    _gh_put_file("data/notify_settings.json", pat, new_ns)
 
         # ── 카카오톡 연결 ─────────────────────────────────────
         st.divider()
