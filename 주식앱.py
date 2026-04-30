@@ -739,7 +739,22 @@ def load_krx_stocks():
     except Exception:
         pass
 
-    # 최종 fallback: 하드코딩 목록 (5분 후 재시도)
+    # 4순위: 번들 JSON 파일 (data/krx_stocks.json — 2882개 종목)
+    try:
+        import os
+        bundle = os.path.join(os.path.dirname(__file__), 'data', 'krx_stocks.json')
+        if os.path.exists(bundle):
+            with open(bundle, encoding='utf-8') as f:
+                rows = json.load(f)
+            result = pd.DataFrame(rows)
+            result['Code'] = result['Code'].astype(str).str.zfill(6)
+            result = result[['Code', 'Name']].drop_duplicates('Code').reset_index(drop=True)
+            if len(result) > 200:
+                return _cache_and_return(result)
+    except Exception:
+        pass
+
+    # 최종 fallback: 하드코딩 30종목
     result = pd.DataFrame(list(KNOWN_NAMES.items()), columns=['Code', 'Name'])
     st.session_state['_krx_cache'] = {'data': result, 'ts': now}
     return result
@@ -2555,7 +2570,7 @@ def render_analysis(code, name, months):
             "border-radius:4px;padding:2px 7px;margin-left:8px;'>⏱ 지연</span>"
         )
 
-    h_col, wl_col, kk_col = st.columns([4, 1, 1])
+    h_col, btn_col = st.columns([5, 1])
     with h_col:
         st.markdown(
             f"### {name} <span style='color:var(--text-sub);font-size:15px'>({code})</span>"
@@ -2563,19 +2578,18 @@ def render_analysis(code, name, months):
             f"<span style='font-size:30px;font-weight:900'>{int(z['last']):,}원</span>"
             f"&nbsp;<span style='font-size:16px;color:{chg_col}'>{arrow} {abs(z['day_chg']):.2f}%</span>",
             unsafe_allow_html=True)
-    with wl_col:
-        st.write(""); st.write("")
+    with btn_col:
+        st.write("")
         if in_watchlist(code):
-            if st.button("⭐ 저장됨", use_container_width=True):
+            if st.button("⭐", use_container_width=True, help="관심종목 해제"):
                 remove_from_watchlist(code); st.rerun()
         else:
-            if st.button("☆ 관심종목", use_container_width=True):
+            if st.button("☆", use_container_width=True, help="관심종목 추가"):
                 add_to_watchlist(code, name); st.rerun()
-    with kk_col:
-        st.write(""); st.write("")
         kakao_token = st.session_state.get('kakao_token')
         if kakao_token:
-            if st.button("📱 카카오 전송", use_container_width=True, type="primary"):
+            if st.button("📱", use_container_width=True, help="카카오톡 전송",
+                         type="primary"):
                 access_token = get_valid_kakao_token()
                 if access_token:
                     msg = format_kakao_message(code, name, z, sig)
@@ -2586,13 +2600,13 @@ def render_analysis(code, name, months):
                         err = result.get('msg', str(result))
                         if result.get('code') in (-401, -403):
                             _clear_kakao_token()
-                            st.warning("카카오 토큰이 만료됐어요. 사이드바에서 다시 로그인해주세요.")
+                            st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
                         else:
                             st.error(f"전송 실패: {err}")
                 else:
-                    st.warning("카카오 토큰이 만료됐어요. 사이드바에서 다시 로그인해주세요.")
+                    st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
         else:
-            st.button("📱 카카오 전송", use_container_width=True, disabled=True,
+            st.button("📱", use_container_width=True, disabled=True,
                       help="사이드바에서 카카오 로그인 후 사용 가능")
 
     # 신호 박스
