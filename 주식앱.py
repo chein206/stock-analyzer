@@ -724,7 +724,9 @@ def load_krx_stocks():
     except Exception:
         pass
 
-    # 최종 fallback: 하드코딩 목록
+    # 최종 fallback: 하드코딩 목록 (캐시 안 함 — 5분 뒤 재시도)
+    # session_state에 짧은 TTL로 저장해 다음 rerun에서 재시도
+    st.session_state['_krx_fallback_ts'] = time.time()
     return pd.DataFrame(list(KNOWN_NAMES.items()), columns=['Code', 'Name'])
 
 
@@ -732,38 +734,86 @@ def search_stocks(krx, query):
     q = query.strip()
     if not q:
         return pd.DataFrame(columns=['Code', 'Name'])
+
     mask = (krx['Name'].str.contains(q, na=False, case=False, regex=False) |
             krx['Code'].str.contains(q, na=False, regex=False))
-    return krx[mask].head(12)
+    results = krx[mask].head(12)
+
+    # KRX 목록이 작으면(fallback 상태) FDR로 직접 재시도
+    if len(krx) < 500:
+        try:
+            import FinanceDataReader as fdr
+            full = fdr.StockListing('KRX')
+            if full is not None and len(full) > 200:
+                col_map = {}
+                for c in full.columns:
+                    cl = c.lower().strip().replace(' ', '').replace('_', '')
+                    if cl in ('code', 'symbol', '종목코드', 'ticker', 'shortcode'):
+                        col_map[c] = 'Code'
+                    elif cl in ('name', '종목명', '회사명', 'corpname', 'shortname', '기업명'):
+                        col_map[c] = 'Name'
+                full = full.rename(columns=col_map)
+                if 'Code' in full.columns and 'Name' in full.columns:
+                    full['Code'] = full['Code'].astype(str).str.extract(r'(\d{6})')[0]
+                    full = full.dropna(subset=['Code'])
+                    mask2 = (full['Name'].str.contains(q, na=False, case=False, regex=False) |
+                             full['Code'].str.contains(q, na=False, regex=False))
+                    results = full[mask2][['Code', 'Name']].head(12)
+                    # 성공하면 캐시 무효화해서 다음엔 전체 목록 사용
+                    load_krx_stocks.clear()
+        except Exception:
+            pass
+
+    return results
 
 
 # ── 관심종목 (쿠키 기반) ──────────────────────────────────────────────────────
 def init_watchlist():
     """GitHub(우선) → 쿠키 순서로 관심종목 불러오기.
-    쿠키는 첫 렌더링 때 비동기로 늦게 읽히므로 GitHub를 1순위로 사용.
+    쿠키는 첫 렌더링 때 비동기로 늦게 읽히므로 한 번 rerun 후 재시도.
     """
-    if 'watchlist' not in st.session_state: st.session_state.watchlist = []
-    if 'wl_loaded' not in st.session_state: st.session_state.wl_loaded = False
+    if 'watchlist'    not in st.session_state: st.session_state.watchlist    = []
+    if 'wl_loaded'    not in st.session_state: st.session_state.wl_loaded    = False
+    if 'wl_rerun_try' not in st.session_state: st.session_state.wl_rerun_try = False
 
-    if not st.session_state.wl_loaded:
-        loaded = []
-        # 1) GitHub 우선 (PAT 있을 때 — 크로스 기기 동기화)
+    if st.session_state.wl_loaded:
+        return
+
+    loaded     = []
+    gh_loaded  = False
+
+    # 1) GitHub 우선 (크로스 기기 동기화)
+    try:
+        gh = _load_watchlist_from_github()
+        if gh:
+            loaded    = gh
+            gh_loaded = True
+    except Exception:
+        pass
+
+    # 2) 쿠키 fallback
+    if not loaded and _ctrl is not None:
         try:
-            loaded = _load_watchlist_from_github()
+            raw = _ctrl.get('kr_watchlist')
+            if raw:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(parsed, list) and parsed:
+                    loaded = parsed
         except Exception:
             pass
-        # 2) GitHub 없으면 쿠키 fallback
-        if not loaded and _ctrl is not None:
-            try:
-                raw = _ctrl.get('kr_watchlist')
-                if raw:
-                    parsed = json.loads(raw) if isinstance(raw, str) else raw
-                    if isinstance(parsed, list):
-                        loaded = parsed
-            except Exception:
-                pass
-        if loaded:
-            st.session_state.watchlist = loaded
+
+    if loaded:
+        st.session_state.watchlist = loaded
+        st.session_state.wl_loaded = True
+        # 쿠키에만 있고 GitHub엔 없으면 → GitHub 동기화
+        if not gh_loaded:
+            _sync_watchlist_to_github(loaded)
+    elif not st.session_state.wl_rerun_try:
+        # 첫 렌더 타이밍 문제일 수 있으니 1회 rerun 후 재시도
+        st.session_state.wl_rerun_try = True
+        st.rerun()
+    else:
+        # 두 번 시도해도 없으면 진짜 빈 목록
         st.session_state.wl_loaded = True
 
 
