@@ -647,8 +647,18 @@ KNOWN_NAMES = {
 }
 
 # ── KRX 전체 종목 ─────────────────────────────────────────────────────────────
-@st.cache_data(ttl=86400)
 def load_krx_stocks():
+    """KRX 전체 종목 로드. 결과 크기에 따라 캐시 TTL 자동 조절.
+    전체 목록(>500): 24시간 캐시 / fallback(<500): 5분 후 재시도.
+    """
+    cache = st.session_state.get('_krx_cache', {})
+    now   = time.time()
+    if cache:
+        data = cache.get('data')
+        ttl  = 86400 if (data is not None and len(data) > 500) else 300
+        if now - cache.get('ts', 0) < ttl:
+            return data
+
     def _normalize(df):
         """컬럼명 → Code/Name 으로 통일. 실패 시 None 반환."""
         col_map = {}
@@ -669,12 +679,16 @@ def load_krx_stocks():
         df = df.dropna(subset=['Code'])
         return df.drop_duplicates('Code').reset_index(drop=True)
 
+    def _cache_and_return(df):
+        st.session_state['_krx_cache'] = {'data': df, 'ts': now}
+        return df
+
     # 1순위: FDR KRX 전체
     try:
         import FinanceDataReader as fdr
         result = _normalize(fdr.StockListing('KRX'))
         if result is not None and len(result) > 200:
-            return result
+            return _cache_and_return(result)
     except Exception:
         pass
 
@@ -692,7 +706,7 @@ def load_krx_stocks():
         if parts:
             combined = pd.concat(parts, ignore_index=True).drop_duplicates('Code')
             if len(combined) > 200:
-                return combined.reset_index(drop=True)
+                return _cache_and_return(combined.reset_index(drop=True))
     except Exception:
         pass
 
@@ -701,7 +715,7 @@ def load_krx_stocks():
         from pykrx import stock as pstock
         from datetime import datetime, timedelta
         tickers = []
-        for back in range(5):   # 최근 5거래일 중 데이터 있는 날 탐색
+        for back in range(5):
             d = (datetime.today() - timedelta(days=back)).strftime('%Y%m%d')
             try:
                 t = (pstock.get_market_ticker_list(d, market='KOSPI') +
@@ -720,14 +734,15 @@ def load_krx_stocks():
                 except Exception:
                     pass
             if len(rows) > 200:
-                return pd.DataFrame(rows).drop_duplicates('Code').reset_index(drop=True)
+                return _cache_and_return(
+                    pd.DataFrame(rows).drop_duplicates('Code').reset_index(drop=True))
     except Exception:
         pass
 
-    # 최종 fallback: 하드코딩 목록 (캐시 안 함 — 5분 뒤 재시도)
-    # session_state에 짧은 TTL로 저장해 다음 rerun에서 재시도
-    st.session_state['_krx_fallback_ts'] = time.time()
-    return pd.DataFrame(list(KNOWN_NAMES.items()), columns=['Code', 'Name'])
+    # 최종 fallback: 하드코딩 목록 (5분 후 재시도)
+    result = pd.DataFrame(list(KNOWN_NAMES.items()), columns=['Code', 'Name'])
+    st.session_state['_krx_cache'] = {'data': result, 'ts': now}
+    return result
 
 
 def search_stocks(krx, query):
@@ -759,8 +774,9 @@ def search_stocks(krx, query):
                     mask2 = (full['Name'].str.contains(q, na=False, case=False, regex=False) |
                              full['Code'].str.contains(q, na=False, regex=False))
                     results = full[mask2][['Code', 'Name']].head(12)
-                    # 성공하면 캐시 무효화해서 다음엔 전체 목록 사용
-                    load_krx_stocks.clear()
+                    # 성공하면 session_state 캐시 갱신
+                    if len(full) > 500:
+                        st.session_state['_krx_cache'] = {'data': full[['Code','Name']], 'ts': time.time()}
         except Exception:
             pass
 
