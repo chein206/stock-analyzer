@@ -122,10 +122,24 @@ html, body, [class*="css"] {
 .app-sub   { font-size: 12px; color: var(--text-sub); }
 .app-muted { color: var(--text-muted); font-size: 13px; }
 
+/* ── 헤더 영역 작은 버튼 ─────────────────────────────────────────────────── */
+.small-btn-area .stButton > button {
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+    min-height: 0 !important;
+    height: 32px !important;
+    line-height: 1.2 !important;
+}
+
 @media (max-width: 640px) {
     .signal-label { font-size: 20px; }
     .signal-emoji { font-size: 36px; }
     .zone-value   { font-size: 15px; }
+    .small-btn-area .stButton > button {
+        font-size: 11px !important;
+        padding: 3px 6px !important;
+        height: 28px !important;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -823,22 +837,31 @@ def init_watchlist():
     """
     if 'watchlist'    not in st.session_state: st.session_state.watchlist    = []
     if 'wl_loaded'    not in st.session_state: st.session_state.wl_loaded    = False
-    if 'wl_rerun_try' not in st.session_state: st.session_state.wl_rerun_try = False
+    if 'wl_rerun_try' not in st.session_state: st.session_state.wl_rerun_try = 0
+    if '_wl_debug'    not in st.session_state: st.session_state._wl_debug    = []
 
     if st.session_state.wl_loaded:
         return
 
     loaded     = []
     gh_loaded  = False
+    dbg = st.session_state._wl_debug
 
     # 1) GitHub 우선 (크로스 기기 동기화)
-    try:
-        gh = _load_watchlist_from_github()
-        if gh:
-            loaded    = gh
-            gh_loaded = True
-    except Exception:
-        pass
+    pat = st.secrets.get("github_pat", "")
+    if pat:
+        try:
+            gh = _load_watchlist_from_github()
+            if gh:
+                loaded    = gh
+                gh_loaded = True
+                dbg.append(f"✅ GitHub 로드 성공: {len(gh)}개")
+            else:
+                dbg.append("⚠️ GitHub 파일 비어있음")
+        except Exception as e:
+            dbg.append(f"❌ GitHub 로드 실패: {e}")
+    else:
+        dbg.append("⚠️ github_pat 미설정")
 
     # 2) 쿠키 fallback
     if not loaded and _ctrl is not None:
@@ -848,38 +871,53 @@ def init_watchlist():
                 parsed = json.loads(raw) if isinstance(raw, str) else raw
                 if isinstance(parsed, list) and parsed:
                     loaded = parsed
-        except Exception:
-            pass
+                    dbg.append(f"✅ 쿠키 로드: {len(parsed)}개")
+            else:
+                dbg.append(f"⚠️ 쿠키 없음 (rerun #{st.session_state.wl_rerun_try})")
+        except Exception as e:
+            dbg.append(f"❌ 쿠키 로드 실패: {e}")
 
     if loaded:
         st.session_state.watchlist = loaded
         st.session_state.wl_loaded = True
         # 쿠키에만 있고 GitHub엔 없으면 → GitHub 동기화
         if not gh_loaded:
-            _sync_watchlist_to_github(loaded)
-    elif not st.session_state.wl_rerun_try:
-        # 첫 렌더 타이밍 문제일 수 있으니 1회 rerun 후 재시도
-        st.session_state.wl_rerun_try = True
+            ok = _sync_watchlist_to_github(loaded)
+            dbg.append(f"GitHub 동기화: {'성공' if ok else '실패'}")
+    elif st.session_state.wl_rerun_try < 2:
+        # 쿠키 비동기 타이밍 이슈로 최대 2회 rerun
+        st.session_state.wl_rerun_try += 1
         st.rerun()
     else:
-        # 두 번 시도해도 없으면 진짜 빈 목록
+        # 여러 번 시도해도 없으면 진짜 빈 목록
         st.session_state.wl_loaded = True
+        dbg.append("📭 관심종목 없음 (GitHub+쿠키 모두 비어있음)")
 
 
 def _save_watchlist():
-    """관심종목 쿠키 + GitHub 동기화"""
-    # 쿠키 저장
+    """관심종목 쿠키 + GitHub 동기화 (저장 결과 추적)"""
+    wl = st.session_state.watchlist
+    saved_any = False
+
+    # 1) GitHub 동기화 (가장 안정적 — PAT 있을 때)
+    gh_ok = _sync_watchlist_to_github(wl)
+    if gh_ok:
+        saved_any = True
+
+    # 2) 쿠키 저장 (보조)
     if _ctrl is not None:
         try:
             _ctrl.set(
                 'kr_watchlist',
-                json.dumps(st.session_state.watchlist, ensure_ascii=False),
+                json.dumps(wl, ensure_ascii=False),
                 max_age=60 * 60 * 24 * 365,
             )
+            saved_any = True
         except Exception:
             pass
-    # GitHub 동기화 (PAT 있을 때만)
-    _sync_watchlist_to_github(st.session_state.watchlist)
+
+    if not saved_any:
+        st.toast("⚠️ 관심종목 저장 실패 — Secrets에 github_pat을 확인하세요", icon="⚠️")
 
 def add_to_watchlist(code, name):
     if not any(i['code'] == code for i in st.session_state.watchlist):
@@ -1001,18 +1039,28 @@ def _sync_watchlist_to_github(watchlist: list) -> bool:
     pat = st.secrets.get("github_pat", "")
     if not pat:
         return False
-    return _gh_put_file(_GH_WL_PATH, pat, {
-        "watchlist": watchlist,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
-    })
+    try:
+        ok = _gh_put_file(_GH_WL_PATH, pat, {
+            "watchlist": watchlist,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+        })
+        return ok
+    except Exception:
+        return False
 
 
 def _load_watchlist_from_github() -> list:
     pat = st.secrets.get("github_pat", "")
     if not pat:
         return []
-    data = _gh_get_file(_GH_WL_PATH, pat)
-    return data.get("watchlist", []) if data else []
+    try:
+        data = _gh_get_file(_GH_WL_PATH, pat)
+        if data and isinstance(data, dict):
+            wl = data.get("watchlist", [])
+            return wl if isinstance(wl, list) else []
+        return []
+    except Exception:
+        return []
 
 
 # ── 알림 GitHub 동기화 ────────────────────────────────────────────────────────
@@ -1093,6 +1141,19 @@ def render_sidebar():
         # ── 미니 신호판 ──────────────────────────────────────
         st.markdown("## ⭐ 관심종목")
         wl = st.session_state.get('watchlist', [])
+
+        # 디버그 정보 (접기)
+        dbg_msgs = st.session_state.get('_wl_debug', [])
+        if dbg_msgs:
+            with st.expander("🔧 동기화 상태", expanded=False):
+                for m in dbg_msgs[-5:]:
+                    st.caption(m)
+                if st.button("🔄 GitHub 재동기화", key="wl_force_sync",
+                             use_container_width=True):
+                    st.session_state.wl_loaded = False
+                    st.session_state.wl_rerun_try = 0
+                    st.session_state._wl_debug = []
+                    st.rerun()
 
         if not wl:
             st.markdown(
@@ -1311,75 +1372,79 @@ def render_sidebar():
             if not KAKAO_REST_KEY and not _KAKAO_STATIC_TOKEN:
                 st.warning("Secrets에 `kakao_rest_key` 또는\n`kakao_access_token`을 설정하세요")
             else:
-                # ── 방법 1: OAuth 로그인 (새 탭) ─────────────
+                # ── 가장 쉬운 방법: 토큰 직접 입력 ───────────
+                st.markdown("**가장 간단한 연결 방법:**")
+                st.caption(
+                    "1. [developers.kakao.com](https://developers.kakao.com) 접속\n"
+                    "2. 상단 **내 애플리케이션** 클릭\n"
+                    "3. 사용할 앱 선택 (KR Stock Analyzer)\n"
+                    "4. 왼쪽 메뉴에서 **도구** 클릭\n"
+                    "5. **카카오 로그인 > 토큰 발급** 영역에서\n"
+                    "   `talk_message` 체크 후 **토큰 발급** 클릭\n"
+                    "6. 발급된 **액세스 토큰**을 아래에 붙여넣기\n\n"
+                    "⚠️ 토큰은 수시간 후 만료됩니다.\n"
+                    "Streamlit Secrets에 `kakao_access_token`으로\n"
+                    "저장하면 앱 재시작 시 자동 연결됩니다."
+                )
+                manual_tok = st.text_input(
+                    "액세스 토큰",
+                    type="password",
+                    placeholder="발급받은 액세스 토큰 붙여넣기",
+                    key="kakao_manual_token_input",
+                )
+                if st.button("✅ 토큰으로 연결", key="kakao_manual_apply",
+                             use_container_width=True):
+                    ok, err = _apply_manual_kakao_token(manual_tok)
+                    if ok:
+                        st.session_state['_kakao_notify'] = (
+                            'success',
+                            '✅ 토큰 저장 완료! 테스트 버튼으로 확인하세요.')
+                        st.rerun()
+                    else:
+                        st.error(err)
+
+                # ── OAuth 로그인 (고급) ──────────────────────
                 if KAKAO_REST_KEY:
-                    auth_url = kakao_auth_url()
-                    # st.link_button은 새 탭으로 열림 (HTML anchor 대체)
-                    st.link_button(
-                        "🔗 카카오 로그인 (새 탭)",
-                        auth_url,
-                        use_container_width=True,
-                    )
-                    st.caption(
-                        "① 위 버튼 클릭 → 카카오 로그인\n"
-                        "② 로그인 후 리다이렉트된 URL에서 `?code=` 뒤 값을 복사\n"
-                        "③ 아래 **auth code 입력**에 붙여넣기"
-                    )
-
-                # ── 방법 2: Auth code 직접 입력 ──────────────
-                with st.expander("📋 Auth code 직접 입력"):
-                    st.caption(
-                        "카카오 로그인 후 브라우저 주소창에서\n"
-                        "`?code=XXXX` 부분의 XXXX만 복사해서 붙여넣기\n\n"
-                        "예) `...streamlit.app?code=abc123` → `abc123` 입력"
-                    )
-                    auth_code_input = st.text_input(
-                        "카카오 Auth Code",
-                        placeholder="code 값을 붙여넣으세요",
-                        key="kakao_auth_code_input",
-                    )
-                    if st.button("✅ 코드로 연결", key="kakao_code_apply",
-                                 use_container_width=True):
-                        if auth_code_input:
-                            with st.spinner("토큰 교환 중..."):
-                                ok, err = _apply_kakao_auth_code(auth_code_input)
-                            if ok:
-                                st.session_state['_kakao_notify'] = (
-                                    'success', '✅ 카카오 연결 완료!')
-                                st.rerun()
+                    with st.expander("🔗 OAuth 자동 로그인 (고급)"):
+                        st.caption(
+                            "**사전 설정 필요:**\n"
+                            "카카오 개발자 콘솔 → 앱 선택 → 왼쪽 **카카오 로그인** →\n"
+                            "**활성화 설정**: ON →\n"
+                            "**Redirect URI**: 아래 주소 추가\n"
+                            f"`{REDIRECT_URI}`\n\n"
+                            "왼쪽 **동의항목** → `카카오톡 메시지 전송` 필수동의로 설정"
+                        )
+                        auth_url = kakao_auth_url()
+                        st.link_button(
+                            "카카오 로그인 (새 탭)",
+                            auth_url,
+                            use_container_width=True,
+                        )
+                        st.caption(
+                            "로그인 후 주소창 `?code=XXXX`의\n"
+                            "XXXX 부분만 복사해서 아래에 입력"
+                        )
+                        auth_code_input = st.text_input(
+                            "Auth Code",
+                            placeholder="code 값",
+                            key="kakao_auth_code_input",
+                        )
+                        if st.button("✅ 코드로 연결", key="kakao_code_apply",
+                                     use_container_width=True):
+                            if auth_code_input:
+                                with st.spinner("토큰 교환 중..."):
+                                    ok, err = _apply_kakao_auth_code(auth_code_input)
+                                if ok:
+                                    st.session_state['_kakao_notify'] = (
+                                        'success', '✅ 카카오 연결 완료!')
+                                    st.rerun()
+                                else:
+                                    st.error(err)
+                                    if dbg := st.session_state.pop('_kakao_debug', None):
+                                        with st.expander("🔍 오류 상세"):
+                                            st.code(dbg)
                             else:
-                                st.error(err)
-                                if dbg := st.session_state.pop('_kakao_debug', None):
-                                    with st.expander("🔍 오류 상세"):
-                                        st.code(dbg)
-                        else:
-                            st.warning("code를 입력해주세요.")
-
-                # ── 방법 3: 액세스 토큰 직접 입력 ───────────
-                with st.expander("🔑 액세스 토큰 직접 입력"):
-                    st.caption(
-                        "카카오 개발자 콘솔 → 내 앱 선택\n"
-                        "→ **도구 > 토큰 발급** 또는\n"
-                        "→ **플랫폼 > 카카오 로그인 테스트**에서 발급\n\n"
-                        "⚠️ '앱 키'가 아닌 **액세스 토큰**을 입력하세요.\n"
-                        "Secrets에 `kakao_access_token`으로 저장하면 자동 연결됩니다."
-                    )
-                    manual_tok = st.text_input(
-                        "액세스 토큰",
-                        type="password",
-                        placeholder="액세스 토큰 (앱 키 아님)",
-                        key="kakao_manual_token_input",
-                    )
-                    if st.button("✅ 토큰 저장 후 연결", key="kakao_manual_apply",
-                                 use_container_width=True):
-                        ok, err = _apply_manual_kakao_token(manual_tok)
-                        if ok:
-                            st.session_state['_kakao_notify'] = (
-                                'success',
-                                '✅ 토큰 저장 완료! 아래 테스트 버튼으로 확인하세요.')
-                            st.rerun()
-                        else:
-                            st.error(err)
+                                st.warning("code를 입력해주세요.")
 
         # ── KIS API 연결 상태 ─────────────────────────────────────
         st.divider()
@@ -2570,7 +2635,7 @@ def render_analysis(code, name, months):
             "border-radius:4px;padding:2px 7px;margin-left:8px;'>⏱ 지연</span>"
         )
 
-    h_col, wl_col, kk_col = st.columns([4, 1, 1])
+    h_col, btn_col = st.columns([5, 2])
     with h_col:
         st.markdown(
             f"### {name} <span style='color:var(--text-sub);font-size:15px'>({code})</span>"
@@ -2578,37 +2643,39 @@ def render_analysis(code, name, months):
             f"<span style='font-size:30px;font-weight:900'>{int(z['last']):,}원</span>"
             f"&nbsp;<span style='font-size:16px;color:{chg_col}'>{arrow} {abs(z['day_chg']):.2f}%</span>",
             unsafe_allow_html=True)
-    with wl_col:
-        st.write("")
-        if in_watchlist(code):
-            if st.button("⭐ 저장됨", use_container_width=True, help="관심종목 해제"):
-                remove_from_watchlist(code); st.rerun()
-        else:
-            if st.button("☆ 관심종목", use_container_width=True):
-                add_to_watchlist(code, name); st.rerun()
-    with kk_col:
-        st.write("")
-        kakao_token = st.session_state.get('kakao_token')
-        if kakao_token:
-            if st.button("📱 카카오전송", use_container_width=True, type="primary"):
-                access_token = get_valid_kakao_token()
-                if access_token:
-                    msg = format_kakao_message(code, name, z, sig)
-                    ok, result = send_kakao_message(access_token, msg)
-                    if ok:
-                        st.toast("카카오톡으로 전송했어요! ✅", icon="📱")
-                    else:
-                        err = result.get('msg', str(result))
-                        if result.get('code') in (-401, -403):
-                            _clear_kakao_token()
-                            st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
+    with btn_col:
+        st.markdown("<div class='small-btn-area'>", unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        with b1:
+            if in_watchlist(code):
+                if st.button("⭐저장됨", use_container_width=True, help="관심종목 해제"):
+                    remove_from_watchlist(code); st.rerun()
+            else:
+                if st.button("☆관심", use_container_width=True):
+                    add_to_watchlist(code, name); st.rerun()
+        with b2:
+            kakao_token = st.session_state.get('kakao_token')
+            if kakao_token:
+                if st.button("📱전송", use_container_width=True, type="primary"):
+                    access_token = get_valid_kakao_token()
+                    if access_token:
+                        msg = format_kakao_message(code, name, z, sig)
+                        ok, result = send_kakao_message(access_token, msg)
+                        if ok:
+                            st.toast("카카오톡으로 전송했어요! ✅", icon="📱")
                         else:
-                            st.error(f"전송 실패: {err}")
-                else:
-                    st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
-        else:
-            st.button("📱 카카오전송", use_container_width=True, disabled=True,
-                      help="사이드바에서 카카오 로그인 후 사용 가능")
+                            err = result.get('msg', str(result))
+                            if result.get('code') in (-401, -403):
+                                _clear_kakao_token()
+                                st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
+                            else:
+                                st.error(f"전송 실패: {err}")
+                    else:
+                        st.warning("카카오 토큰 만료. 사이드바에서 재연결해주세요.")
+            else:
+                st.button("📱전송", use_container_width=True, disabled=True,
+                          help="사이드바에서 카카오 로그인 후 사용 가능")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # 신호 박스
     s = sig
