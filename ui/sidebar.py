@@ -203,16 +203,22 @@ def render_sidebar():
         st.divider()
         st.markdown("### 📱 카카오톡")
 
-        if notify := st.session_state.pop('_kakao_notify', None):
+        # 알림: pop 대신 get 으로 유지 (재실행 후에도 표시)
+        notify = st.session_state.get('_kakao_notify')
+        if notify:
             kind, msg = notify
             if kind == 'success':
                 st.success(msg)
             else:
                 st.error(msg)
-                if debug := st.session_state.pop('_kakao_debug', None):
-                    with st.expander("🔍 오류 상세"):
+                debug = st.session_state.get('_kakao_debug', '')
+                if debug:
+                    with st.expander("🔍 오류 상세 (캡처해서 공유)"):
                         st.code(debug, language=None)
-                        st.caption("이 내용을 캡처해서 공유해주세요")
+            if st.button("✕ 닫기", key="kakao_notify_dismiss"):
+                st.session_state.pop('_kakao_notify', None)
+                st.session_state.pop('_kakao_debug', None)
+                st.rerun()
 
         kakao_token = st.session_state.get('kakao_token')
 
@@ -252,6 +258,20 @@ def render_sidebar():
                 auth_url = kakao_auth_url()
                 st.link_button("🔑 카카오 로그인", auth_url,
                                use_container_width=True)
+                # 수동 코드 입력 (임시 디버그용)
+                _manual_code = st.text_input("code 직접 입력 (디버그용)",
+                                             key="kakao_manual_debug_code",
+                                             placeholder="URL의 ?code= 값")
+                if st.button("교환 시도", key="kakao_manual_debug_btn"):
+                    if _manual_code.strip():
+                        st.session_state.pop('_kakao_used_code', None)
+                        with st.spinner("교환 중..."):
+                            ok, err = _apply_kakao_auth_code(_manual_code.strip())
+                        if ok:
+                            st.session_state['_kakao_notify'] = ('success', '✅ 연결 완료!')
+                        else:
+                            st.session_state['_kakao_notify'] = ('error', err)
+                        st.rerun()
                 with st.expander("🔍 디버그 정보"):
                     st.caption(f"키 앞 6자: `{KAKAO_REST_KEY[:6]}...`")
                     st.caption(f"콜백 파라미터: `{st.session_state.get('_cb_params', '미실행')}`")
