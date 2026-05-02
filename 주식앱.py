@@ -35,6 +35,14 @@ st.set_page_config(
 from ui.styles import inject_styles
 inject_styles()
 
+# ── 카카오 콜백 파라미터 조기 캡처 ────────────────────────────────────────────
+# CookieController 초기화가 query_params를 지우기 전에 먼저 저장
+_qp_now = st.query_params.to_dict()
+if 'code' in _qp_now:
+    st.session_state.setdefault('_kakao_pending_code', _qp_now['code'])
+elif 'error' in _qp_now:
+    st.session_state.setdefault('_kakao_pending_error', _qp_now)
+
 # ── 공유 상태 + CookieController ─────────────────────────────────────────────
 from utils.shared import shared
 try:

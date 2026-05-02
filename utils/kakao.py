@@ -120,8 +120,20 @@ def init_kakao():
 
 
 def handle_kakao_callback():
-    """URL ?code= 파라미터 처리 (OAuth 리디렉션 콜백)."""
+    """URL ?code= 파라미터 처리 (OAuth 리디렉션 콜백).
+    CookieController가 query_params를 지울 수 있으므로
+    주식앱.py에서 미리 session_state에 저장한 값도 확인.
+    """
+    # query_params 우선, 없으면 session_state 캐시 사용
     params = st.query_params.to_dict()
+    if not params:
+        pending_code  = st.session_state.pop('_kakao_pending_code',  None)
+        pending_error = st.session_state.pop('_kakao_pending_error', None)
+        if pending_code:
+            params = {'code': pending_code}
+        elif pending_error:
+            params = pending_error
+
     # 디버그: 받은 파라미터 항상 기록
     st.session_state['_cb_params'] = list(params.keys()) or ['(없음)']
 
