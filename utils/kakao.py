@@ -120,60 +120,20 @@ def init_kakao():
 
 
 def handle_kakao_callback():
-    """URL ?code= 파라미터 처리 (OAuth 리디렉션 콜백).
-    CookieController가 query_params를 지울 수 있으므로
-    주식앱.py에서 미리 session_state에 저장한 값도 확인.
+    """URL ?code= 파라미터 기록만 (교환은 사용자가 수동으로 진행).
+    자동 교환 시 code가 소비되어 수동 입력이 불가능해지는 문제 방지.
     """
-    # query_params 우선, 없으면 session_state 캐시 사용
     params = st.query_params.to_dict()
-    if not params:
-        pending_code  = st.session_state.pop('_kakao_pending_code',  None)
-        pending_error = st.session_state.pop('_kakao_pending_error', None)
-        if pending_code:
-            params = {'code': pending_code}
-        elif pending_error:
-            params = pending_error
-
-    # 디버그: 받은 파라미터 항상 기록
-    st.session_state['_cb_params'] = list(params.keys()) or ['(없음)']
-
+    # error 파라미터만 처리
     if 'error' in params:
         st.query_params.clear()
         desc = params.get('error_description', params['error'])
         st.session_state['_kakao_notify'] = ('error', f"카카오 로그인 거부: {desc}")
-        st.session_state['_kakao_debug']  = f"error params: {params}"
         return
-
-    code = params.get('code')
-    if not code:
-        return
-
-    # 동일 code 재처리 방지
-    if st.session_state.get('_kakao_used_code') == code:
+    # code가 있으면 URL만 정리 (교환하지 않음)
+    if 'code' in params:
+        st.session_state['_cb_params'] = ['code — URL에서 확인 후 아래 입력란에 붙여넣기']
         st.query_params.clear()
-        return
-    st.session_state['_kakao_used_code'] = code
-
-    key_hint = KAKAO_REST_KEY[:6] + "..." if KAKAO_REST_KEY else "(없음)"
-    status, result = _exchange_kakao_code(code)
-    st.query_params.clear()
-
-    if status == 200 and result.get('access_token'):
-        token_data = {
-            'access_token':  result['access_token'],
-            'refresh_token': result.get('refresh_token', ''),
-            'expires_at':    int(time.time()) + result.get('expires_in', 21600),
-        }
-        st.session_state['kakao_token']          = token_data
-        st.session_state['_kakao_cookie_loaded'] = True
-        _save_kakao_token(token_data)
-        st.session_state['_kakao_notify'] = ('success', '✅ 카카오톡 연결 완료!')
-    else:
-        err   = (result.get('error_description') or result.get('msg')
-                 or result.get('error') or '알 수 없는 오류')
-        debug = f"key앞6자: {key_hint} | HTTP {status} | {json.dumps(result, ensure_ascii=False)[:200]}"
-        st.session_state['_kakao_notify'] = ('error', f"토큰 교환 실패: {err}")
-        st.session_state['_kakao_debug']  = debug
 
 
 def _apply_kakao_auth_code(auth_code: str) -> tuple[bool, str]:
@@ -181,9 +141,6 @@ def _apply_kakao_auth_code(auth_code: str) -> tuple[bool, str]:
     auth_code = auth_code.strip()
     if not auth_code:
         return False, "코드를 입력해주세요."
-    if st.session_state.get('_kakao_used_code') == auth_code:
-        return False, "이미 사용된 코드입니다. 다시 로그인해서 새 코드를 받아주세요."
-    st.session_state['_kakao_used_code'] = auth_code
 
     status, result = _exchange_kakao_code(auth_code)
     if status == 200 and result.get('access_token'):
