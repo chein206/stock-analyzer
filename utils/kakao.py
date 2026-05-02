@@ -127,6 +127,7 @@ def handle_kakao_callback():
         st.query_params.clear()
         desc = params.get('error_description', params['error'])
         st.session_state['_kakao_notify'] = ('error', f"카카오 로그인 거부: {desc}")
+        st.session_state['_kakao_debug']  = f"error params: {params}"
         return
 
     code = params.get('code')
@@ -139,6 +140,7 @@ def handle_kakao_callback():
         return
     st.session_state['_kakao_used_code'] = code
 
+    key_hint = KAKAO_REST_KEY[:6] + "..." if KAKAO_REST_KEY else "(없음)"
     status, result = _exchange_kakao_code(code)
     st.query_params.clear()
 
@@ -155,7 +157,7 @@ def handle_kakao_callback():
     else:
         err   = (result.get('error_description') or result.get('msg')
                  or result.get('error') or '알 수 없는 오류')
-        debug = f"HTTP {status} | {json.dumps(result, ensure_ascii=False)[:200]}"
+        debug = f"key앞6자: {key_hint} | HTTP {status} | {json.dumps(result, ensure_ascii=False)[:200]}"
         st.session_state['_kakao_notify'] = ('error', f"토큰 교환 실패: {err}")
         st.session_state['_kakao_debug']  = debug
 
