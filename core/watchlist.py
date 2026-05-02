@@ -17,15 +17,31 @@ from utils.github_sync import _gh_put_file, _gh_get_file, _GH_WL_PATH
 
 
 # ── GitHub 동기화 ──────────────────────────────────────────────────────────────
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_watchlist_cached(pat: str) -> list:
+    """GitHub 관심종목 로드 (5분 캐시). 세션이 바뀌어도 즉시 반환."""
+    try:
+        data = _gh_get_file(_GH_WL_PATH, pat)
+        if data and isinstance(data, dict):
+            wl = data.get("watchlist", [])
+            return wl if isinstance(wl, list) else []
+    except Exception:
+        pass
+    return []
+
+
 def _sync_watchlist_to_github(watchlist: list) -> bool:
     pat = st.secrets.get("github_pat", "")
     if not pat:
         return False
     try:
-        return _gh_put_file(_GH_WL_PATH, pat, {
+        ok = _gh_put_file(_GH_WL_PATH, pat, {
             "watchlist":  watchlist,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         })
+        if ok:
+            _fetch_watchlist_cached.clear()  # 캐시 무효화 → 다음 로드 시 새 데이터
+        return ok
     except Exception:
         return False
 
@@ -34,76 +50,52 @@ def _load_watchlist_from_github() -> list:
     pat = st.secrets.get("github_pat", "")
     if not pat:
         return []
-    try:
-        data = _gh_get_file(_GH_WL_PATH, pat)
-        if data and isinstance(data, dict):
-            wl = data.get("watchlist", [])
-            return wl if isinstance(wl, list) else []
-        return []
-    except Exception:
-        return []
+    return _fetch_watchlist_cached(pat)
 
 
 # ── 공개 API ──────────────────────────────────────────────────────────────────
 def init_watchlist():
-    """GitHub(우선) → 쿠키 순서로 관심종목 불러오기.
-    쿠키는 첫 렌더링 때 비동기로 늦게 읽히므로 최대 2회 rerun 후 재시도.
-    """
-    if 'watchlist'    not in st.session_state: st.session_state.watchlist    = []
-    if 'wl_loaded'    not in st.session_state: st.session_state.wl_loaded    = False
-    if 'wl_rerun_try' not in st.session_state: st.session_state.wl_rerun_try = 0
-    if '_wl_debug'    not in st.session_state: st.session_state._wl_debug    = []
+    """GitHub 캐시 → 쿠키 순서로 관심종목 불러오기."""
+    if 'watchlist' not in st.session_state: st.session_state.watchlist = []
+    if 'wl_loaded' not in st.session_state: st.session_state.wl_loaded = False
+    if '_wl_debug' not in st.session_state: st.session_state._wl_debug = []
 
     if st.session_state.wl_loaded:
         return
 
-    loaded    = []
-    gh_loaded = False
-    dbg = st.session_state._wl_debug
+    loaded = []
+    dbg    = st.session_state._wl_debug
 
-    # 1) GitHub 우선 (크로스 기기 동기화)
+    # 1) GitHub (캐시 사용 → 세션 바뀌어도 즉시 반환)
     pat = st.secrets.get("github_pat", "")
     if pat:
-        try:
-            gh = _load_watchlist_from_github()
-            if gh:
-                loaded    = gh
-                gh_loaded = True
-                dbg.append(f"✅ GitHub 로드 성공: {len(gh)}개")
-            else:
-                dbg.append("⚠️ GitHub 파일 비어있음")
-        except Exception as e:
-            dbg.append(f"❌ GitHub 로드 실패: {e}")
+        gh = _load_watchlist_from_github()
+        if gh:
+            loaded = gh
+            dbg.append(f"✅ GitHub 로드: {len(gh)}개")
+        else:
+            dbg.append("⚠️ GitHub 비어있음")
     else:
         dbg.append("⚠️ github_pat 미설정")
 
-    # 2) 쿠키 fallback
-    ctrl = shared.ctrl
-    if not loaded and ctrl is not None:
-        try:
-            raw = ctrl.get('kr_watchlist')
-            if raw:
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(parsed, list) and parsed:
-                    loaded = parsed
-                    dbg.append(f"✅ 쿠키 로드: {len(parsed)}개")
-            else:
-                dbg.append(f"⚠️ 쿠키 없음 (rerun #{st.session_state.wl_rerun_try})")
-        except Exception as e:
-            dbg.append(f"❌ 쿠키 로드 실패: {e}")
+    # 2) 쿠키 fallback (GitHub 실패 시)
+    if not loaded:
+        ctrl = shared.ctrl
+        if ctrl is not None:
+            try:
+                raw = ctrl.get('kr_watchlist')
+                if raw:
+                    parsed = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(parsed, list) and parsed:
+                        loaded = parsed
+                        dbg.append(f"✅ 쿠키 로드: {len(parsed)}개")
+            except Exception as e:
+                dbg.append(f"❌ 쿠키 로드 실패: {e}")
 
-    if loaded:
-        st.session_state.watchlist = loaded
-        st.session_state.wl_loaded = True
-        if not gh_loaded:
-            ok = _sync_watchlist_to_github(loaded)
-            dbg.append(f"GitHub 동기화: {'성공' if ok else '실패'}")
-    elif st.session_state.wl_rerun_try < 2:
-        st.session_state.wl_rerun_try += 1
-        st.rerun()
-    else:
-        st.session_state.wl_loaded = True
-        dbg.append("📭 관심종목 없음 (GitHub+쿠키 모두 비어있음)")
+    st.session_state.watchlist = loaded
+    st.session_state.wl_loaded = True
+    if not loaded:
+        dbg.append("📭 관심종목 없음")
 
 
 def _save_watchlist():
