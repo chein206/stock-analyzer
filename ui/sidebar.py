@@ -250,6 +250,7 @@ def render_sidebar():
                 st.error("⚠️ kakao_rest_key 가 로드되지 않았습니다.\nStreamlit Secrets를 확인하세요.")
             else:
                 st.caption(f"🔑 키 확인: `{KAKAO_REST_KEY[:6]}...`")
+                st.caption(f"🔍 콜백 파라미터: `{st.session_state.get('_cb_params', '미실행')}`")
                 auth_url = kakao_auth_url()
                 st.link_button("🔑 카카오 로그인", auth_url,
                                use_container_width=True)

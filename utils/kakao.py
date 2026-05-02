@@ -122,6 +122,8 @@ def init_kakao():
 def handle_kakao_callback():
     """URL ?code= 파라미터 처리 (OAuth 리디렉션 콜백)."""
     params = st.query_params.to_dict()
+    # 디버그: 받은 파라미터 항상 기록
+    st.session_state['_cb_params'] = list(params.keys()) or ['(없음)']
 
     if 'error' in params:
         st.query_params.clear()
