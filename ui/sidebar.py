@@ -249,38 +249,15 @@ def render_sidebar():
             if not KAKAO_REST_KEY:
                 st.warning("Streamlit Secrets에 `kakao_rest_key`를 추가하세요.")
             else:
-                st.caption(
-                    "아래 버튼으로 카카오 로그인 후\n"
-                    "주소창의 `code=` 값을 복사해 입력하세요."
-                )
                 auth_url = kakao_auth_url()
-                st.link_button("🔑 카카오 로그인 (새 탭)", auth_url,
+                st.link_button("🔑 카카오 로그인", auth_url,
                                use_container_width=True)
                 st.caption(
-                    "로그인 완료 후 주소창에서\n"
-                    "`?code=` 뒤의 값만 복사 붙여넣기"
+                    "로그인 후 열리는 새 탭에서\n"
+                    "연결이 자동으로 완료돼요.\n\n"
+                    "완료 후 **이 페이지를 새로고침(F5)**\n"
+                    "하면 연결 상태가 반영됩니다."
                 )
-                auth_code_input = st.text_input(
-                    "code 값 입력",
-                    placeholder="authorization code",
-                    key="kakao_auth_code_input",
-                )
-                if st.button("✅ 연결하기", key="kakao_code_apply",
-                             use_container_width=True):
-                    if auth_code_input.strip():
-                        with st.spinner("토큰 교환 중..."):
-                            ok, err = _apply_kakao_auth_code(auth_code_input)
-                        if ok:
-                            st.session_state['_kakao_notify'] = (
-                                'success', '✅ 카카오톡 연결 완료!')
-                            st.rerun()
-                        else:
-                            st.error(err)
-                            if dbg := st.session_state.pop('_kakao_debug', None):
-                                with st.expander("🔍 오류 상세"):
-                                    st.code(dbg)
-                    else:
-                        st.warning("code 값을 입력해주세요.")
 
         # ── KIS API 상태 ──────────────────────────────────────
         st.divider()
