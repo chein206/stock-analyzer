@@ -1,10 +1,10 @@
 """
 카카오톡 OAuth + 메시지 전송.
-- init_kakao        : 앱 시작 시 토큰 복원
-- handle_kakao_callback : ?code= 파라미터 처리
-- get_valid_kakao_token : 유효 토큰 반환 (만료 시 자동 갱신)
-- send_kakao_message    : 나에게 보내기
-- format_kakao_message  : 분석 결과 포맷팅
+- init_kakao           : 쿠키에서 토큰 복원
+- handle_kakao_callback: ?code= 파라미터 처리 (OAuth 콜백)
+- get_valid_kakao_token: 유효 토큰 반환 (만료 전 자동 갱신)
+- send_kakao_message   : 나에게 보내기
+- format_kakao_message : 분석 결과 포맷팅
 """
 import json
 import time
@@ -16,9 +16,8 @@ import streamlit as st
 from utils.shared import shared
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
-KAKAO_REST_KEY      = st.secrets.get("kakao_rest_key", "")
-REDIRECT_URI        = "https://stock-analyzer-egqwnt22pkfgzdgxuapppyw.streamlit.app"
-_KAKAO_STATIC_TOKEN = st.secrets.get("kakao_access_token", "")
+KAKAO_REST_KEY = st.secrets.get("kakao_rest_key", "")
+REDIRECT_URI   = "https://stock-analyzer-egqwnt22pkfgzdgxuapppyw.streamlit.app"
 
 
 # ── OAuth URL ─────────────────────────────────────────────────────────────────
@@ -34,6 +33,7 @@ def kakao_auth_url() -> str:
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────────
 def _exchange_kakao_code(code: str) -> tuple[int, dict]:
+    """Authorization Code → Access Token + Refresh Token."""
     try:
         r = requests.post(
             "https://kauth.kakao.com/oauth/token",
@@ -51,6 +51,7 @@ def _exchange_kakao_code(code: str) -> tuple[int, dict]:
 
 
 def _refresh_kakao_token(refresh_token: str) -> tuple[int, dict]:
+    """Refresh Token으로 Access Token 갱신."""
     try:
         r = requests.post(
             "https://kauth.kakao.com/oauth/token",
@@ -67,21 +68,21 @@ def _refresh_kakao_token(refresh_token: str) -> tuple[int, dict]:
 
 
 def _save_kakao_token(token_data: dict):
-    """카카오 토큰 쿠키에 저장 (30일)."""
+    """카카오 토큰 쿠키에 저장 (60일)."""
     ctrl = shared.ctrl
     if ctrl is not None:
         try:
             ctrl.set(
                 'kakao_token',
                 json.dumps(token_data, ensure_ascii=False),
-                max_age=60 * 60 * 24 * 30,
+                max_age=60 * 60 * 24 * 60,
             )
         except Exception:
             pass
 
 
 def _clear_kakao_token():
-    """카카오 토큰 초기화."""
+    """카카오 토큰 초기화 (세션 + 쿠키)."""
     st.session_state['kakao_token'] = None
     st.session_state.pop('_kakao_used_code', None)
     ctrl = shared.ctrl
@@ -94,29 +95,18 @@ def _clear_kakao_token():
 
 # ── 공개 API ──────────────────────────────────────────────────────────────────
 def init_kakao():
-    """앱 시작 시 카카오 토큰 초기화.
-    우선순위: ① Secrets 직접 토큰 ② 쿠키 저장 토큰 ③ 없음
-    """
+    """앱 시작 시 쿠키에서 카카오 토큰 복원."""
     if 'kakao_token' not in st.session_state:
         st.session_state['kakao_token'] = None
 
     if st.session_state['kakao_token']:
         return
 
-    # ① Secrets 직접 토큰
-    if _KAKAO_STATIC_TOKEN:
-        st.session_state['kakao_token'] = {
-            'access_token':  _KAKAO_STATIC_TOKEN,
-            'refresh_token': st.secrets.get("kakao_refresh_token", ""),
-            'expires_at':    int(time.time()) + 86400 * 30,
-            'static':        True,
-        }
-        return
-
-    # ② 쿠키 로드 (한 세션에 한 번만)
+    # 쿠키 로드 (세션당 1회)
     if st.session_state.get('_kakao_cookie_loaded'):
         return
     st.session_state['_kakao_cookie_loaded'] = True
+
     ctrl = shared.ctrl
     if ctrl is not None:
         try:
@@ -130,7 +120,7 @@ def init_kakao():
 
 
 def handle_kakao_callback():
-    """URL ?code= 파라미터 처리 (OAuth 콜백)."""
+    """URL ?code= 파라미터 처리 (OAuth 리디렉션 콜백)."""
     params = st.query_params.to_dict()
 
     if 'error' in params:
@@ -143,6 +133,7 @@ def handle_kakao_callback():
     if not code:
         return
 
+    # 동일 code 재처리 방지
     if st.session_state.get('_kakao_used_code') == code:
         st.query_params.clear()
         return
@@ -156,7 +147,6 @@ def handle_kakao_callback():
             'access_token':  result['access_token'],
             'refresh_token': result.get('refresh_token', ''),
             'expires_at':    int(time.time()) + result.get('expires_in', 21600),
-            'static':        False,
         }
         st.session_state['kakao_token']          = token_data
         st.session_state['_kakao_cookie_loaded'] = True
@@ -170,32 +160,13 @@ def handle_kakao_callback():
         st.session_state['_kakao_debug']  = debug
 
 
-def _apply_manual_kakao_token(raw_token: str) -> tuple[bool, str]:
-    """수동 입력 액세스 토큰 저장."""
-    raw_token = raw_token.strip()
-    if not raw_token:
-        return False, "토큰을 입력해주세요."
-    if len(raw_token) < 10:
-        return False, "토큰이 너무 짧아요."
-    token_data = {
-        'access_token':  raw_token,
-        'refresh_token': '',
-        'expires_at':    int(time.time()) + 86400 * 30,
-        'static':        True,
-    }
-    st.session_state['kakao_token']          = token_data
-    st.session_state['_kakao_cookie_loaded'] = True
-    _save_kakao_token(token_data)
-    return True, ""
-
-
 def _apply_kakao_auth_code(auth_code: str) -> tuple[bool, str]:
-    """카카오 auth code → 액세스 토큰 교환 (수동 코드 입력용)."""
+    """수동으로 입력한 auth code → 토큰 교환."""
     auth_code = auth_code.strip()
     if not auth_code:
         return False, "코드를 입력해주세요."
     if st.session_state.get('_kakao_used_code') == auth_code:
-        return False, "이미 사용한 코드입니다. 새로 발급받아주세요."
+        return False, "이미 사용된 코드입니다. 다시 로그인해서 새 코드를 받아주세요."
     st.session_state['_kakao_used_code'] = auth_code
 
     status, result = _exchange_kakao_code(auth_code)
@@ -204,7 +175,6 @@ def _apply_kakao_auth_code(auth_code: str) -> tuple[bool, str]:
             'access_token':  result['access_token'],
             'refresh_token': result.get('refresh_token', ''),
             'expires_at':    int(time.time()) + result.get('expires_in', 21600),
-            'static':        False,
         }
         st.session_state['kakao_token']          = token_data
         st.session_state['_kakao_cookie_loaded'] = True
@@ -219,14 +189,12 @@ def _apply_kakao_auth_code(auth_code: str) -> tuple[bool, str]:
 
 
 def get_valid_kakao_token() -> str | None:
-    """유효한 액세스 토큰 반환 (만료 시 자동 갱신)."""
+    """유효한 액세스 토큰 반환. 만료 5분 전 자동 갱신."""
     token_data = st.session_state.get('kakao_token')
     if not token_data:
         return None
 
-    if token_data.get('static'):
-        return token_data.get('access_token')
-
+    # 만료 5분 전이면 갱신
     if time.time() > token_data.get('expires_at', 0) - 300:
         refresh = token_data.get('refresh_token', '')
         if not refresh:
@@ -248,7 +216,7 @@ def get_valid_kakao_token() -> str | None:
 
 
 def send_kakao_message(access_token: str, text: str) -> tuple[bool, dict]:
-    """카카오 나에게 보내기. result_code==0 이어야 실제 성공."""
+    """카카오 나에게 보내기. result_code == 0 이어야 실제 성공."""
     template = {
         "object_type": "text",
         "text":        text[:2000],
@@ -258,18 +226,21 @@ def send_kakao_message(access_token: str, text: str) -> tuple[bool, dict]:
         },
         "button_title": "앱에서 자세히 보기",
     }
-    r = requests.post(
-        "https://kapi.kakao.com/v2/api/talk/memo/default/send",
-        headers={"Authorization": f"Bearer {access_token}"},
-        data={"template_object": json.dumps(template, ensure_ascii=False)},
-        timeout=10,
-    )
     try:
-        body = r.json()
-    except Exception:
-        body = {"msg": r.text, "code": r.status_code}
-    success = (r.status_code == 200) and (body.get('result_code', -1) == 0)
-    return success, body
+        r = requests.post(
+            "https://kapi.kakao.com/v2/api/talk/memo/default/send",
+            headers={"Authorization": f"Bearer {access_token}"},
+            data={"template_object": json.dumps(template, ensure_ascii=False)},
+            timeout=10,
+        )
+        try:
+            body = r.json()
+        except Exception:
+            body = {"msg": r.text, "code": r.status_code}
+        success = (r.status_code == 200) and (body.get('result_code', -1) == 0)
+        return success, body
+    except Exception as e:
+        return False, {"msg": str(e), "code": 0}
 
 
 def format_kakao_message(code: str, name: str, z: dict, sig: dict) -> str:

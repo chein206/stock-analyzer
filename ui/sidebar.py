@@ -8,9 +8,8 @@ import streamlit as st
 from utils.shared    import shared
 from utils.kis_api   import kis_available, kis_get_token
 from utils.kakao     import (get_valid_kakao_token, send_kakao_message,
-                              _clear_kakao_token, _apply_manual_kakao_token,
-                              _apply_kakao_auth_code, kakao_auth_url,
-                              KAKAO_REST_KEY, _KAKAO_STATIC_TOKEN, REDIRECT_URI)
+                              _clear_kakao_token, _apply_kakao_auth_code,
+                              kakao_auth_url, KAKAO_REST_KEY, REDIRECT_URI)
 from utils.github_sync import _gh_put_file, _gh_get_file
 from core.watchlist  import remove_from_watchlist
 from core.alerts     import (get_quick_price, _check_price_alerts,
@@ -247,72 +246,41 @@ def render_sidebar():
                     st.rerun()
 
         else:
-            if not KAKAO_REST_KEY and not _KAKAO_STATIC_TOKEN:
-                st.warning("Secrets에 `kakao_rest_key` 또는\n`kakao_access_token`을 설정하세요")
+            if not KAKAO_REST_KEY:
+                st.warning("Streamlit Secrets에 `kakao_rest_key`를 추가하세요.")
             else:
-                st.markdown("**가장 간단한 연결 방법:**")
                 st.caption(
-                    "1. [developers.kakao.com](https://developers.kakao.com) 접속\n"
-                    "2. 상단 **내 애플리케이션** 클릭\n"
-                    "3. 사용할 앱 선택 (KR Stock Analyzer)\n"
-                    "4. 왼쪽 메뉴에서 **도구** 클릭\n"
-                    "5. **카카오 로그인 > 토큰 발급** 영역에서\n"
-                    "   `talk_message` 체크 후 **토큰 발급** 클릭\n"
-                    "6. 발급된 **액세스 토큰**을 아래에 붙여넣기\n\n"
-                    "⚠️ 토큰은 수시간 후 만료됩니다.\n"
-                    "Streamlit Secrets에 `kakao_access_token`으로\n"
-                    "저장하면 앱 재시작 시 자동 연결됩니다."
+                    "아래 버튼으로 카카오 로그인 후\n"
+                    "주소창의 `code=` 값을 복사해 입력하세요."
                 )
-                manual_tok = st.text_input(
-                    "액세스 토큰",
-                    type="password",
-                    placeholder="발급받은 액세스 토큰 붙여넣기",
-                    key="kakao_manual_token_input",
+                auth_url = kakao_auth_url()
+                st.link_button("🔑 카카오 로그인 (새 탭)", auth_url,
+                               use_container_width=True)
+                st.caption(
+                    "로그인 완료 후 주소창에서\n"
+                    "`?code=` 뒤의 값만 복사 붙여넣기"
                 )
-                if st.button("✅ 토큰으로 연결", key="kakao_manual_apply",
+                auth_code_input = st.text_input(
+                    "code 값 입력",
+                    placeholder="authorization code",
+                    key="kakao_auth_code_input",
+                )
+                if st.button("✅ 연결하기", key="kakao_code_apply",
                              use_container_width=True):
-                    ok, err = _apply_manual_kakao_token(manual_tok)
-                    if ok:
-                        st.session_state['_kakao_notify'] = (
-                            'success', '✅ 토큰 저장 완료! 테스트 버튼으로 확인하세요.')
-                        st.rerun()
+                    if auth_code_input.strip():
+                        with st.spinner("토큰 교환 중..."):
+                            ok, err = _apply_kakao_auth_code(auth_code_input)
+                        if ok:
+                            st.session_state['_kakao_notify'] = (
+                                'success', '✅ 카카오톡 연결 완료!')
+                            st.rerun()
+                        else:
+                            st.error(err)
+                            if dbg := st.session_state.pop('_kakao_debug', None):
+                                with st.expander("🔍 오류 상세"):
+                                    st.code(dbg)
                     else:
-                        st.error(err)
-
-                if KAKAO_REST_KEY:
-                    with st.expander("🔗 OAuth 자동 로그인 (고급)"):
-                        st.caption(
-                            "**사전 설정 필요:**\n"
-                            "카카오 개발자 콘솔 → 앱 선택 → 왼쪽 **카카오 로그인** →\n"
-                            "**활성화 설정**: ON →\n"
-                            "**Redirect URI**: 아래 주소 추가\n"
-                            f"`{REDIRECT_URI}`\n\n"
-                            "왼쪽 **동의항목** → `카카오톡 메시지 전송` 필수동의로 설정"
-                        )
-                        auth_url = kakao_auth_url()
-                        st.link_button("카카오 로그인 (새 탭)", auth_url, use_container_width=True)
-                        st.caption(
-                            "로그인 후 주소창 `?code=XXXX`의\n"
-                            "XXXX 부분만 복사해서 아래에 입력")
-                        auth_code_input = st.text_input(
-                            "Auth Code", placeholder="code 값",
-                            key="kakao_auth_code_input")
-                        if st.button("✅ 코드로 연결", key="kakao_code_apply",
-                                     use_container_width=True):
-                            if auth_code_input:
-                                with st.spinner("토큰 교환 중..."):
-                                    ok, err = _apply_kakao_auth_code(auth_code_input)
-                                if ok:
-                                    st.session_state['_kakao_notify'] = (
-                                        'success', '✅ 카카오 연결 완료!')
-                                    st.rerun()
-                                else:
-                                    st.error(err)
-                                    if dbg := st.session_state.pop('_kakao_debug', None):
-                                        with st.expander("🔍 오류 상세"):
-                                            st.code(dbg)
-                            else:
-                                st.warning("code를 입력해주세요.")
+                        st.warning("code 값을 입력해주세요.")
 
         # ── KIS API 상태 ──────────────────────────────────────
         st.divider()
