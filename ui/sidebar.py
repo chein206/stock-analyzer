@@ -70,23 +70,24 @@ def render_sidebar():
                     p_color   = '#888'
                     price_str = '데이터 없음'
 
-                st.markdown(
-                    f"<div class='mini-card'>"
-                    f"<span style='font-size:14px;font-weight:700'>{dot} {name}</span>"
-                    f"<br><span style='font-size:12px;color:{p_color};padding-left:4px'>{price_str}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True)
-
-                btn_c, del_c = st.columns([5, 1])
-                with btn_c:
-                    if st.button(f"📊 분석", key=f"wl_btn_{code}", use_container_width=True):
-                        st.session_state['auto_code'] = code
-                        st.session_state['auto_name'] = name
-                        st.rerun()
-                with del_c:
+                # 종목명 + 가격 + 삭제 한 줄
+                nc, dc = st.columns([6, 1])
+                with nc:
+                    st.markdown(
+                        f"<div style='padding:2px 0'>"
+                        f"<span style='font-size:13px;font-weight:700'>{dot} {name}</span><br>"
+                        f"<span style='font-size:12px;color:{p_color}'>{price_str}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True)
+                with dc:
                     if st.button("✕", key=f"wl_del_{code}"):
                         remove_from_watchlist(code)
                         st.rerun()
+
+                if st.button(f"📊 분석", key=f"wl_btn_{code}", use_container_width=True):
+                    st.session_state['auto_code'] = code
+                    st.session_state['auto_name'] = name
+                    st.rerun()
 
                 # 알림 설정 (종목별)
                 _al = st.session_state['price_alerts'].get(code, {})
@@ -94,18 +95,19 @@ def render_sidebar():
                 with st.expander(_al_label, expanded=False):
                     _c1, _c2 = st.columns(2)
                     with _c1:
+                        st.caption("🎯 목표가")
                         _tgt = st.number_input(
-                            "🎯목표", min_value=0,
+                            "목표가", min_value=0,
                             value=int(_al.get('target') or (price * 1.10 if price else 0)),
-                            step=100, key=f"al_tgt_{code}", label_visibility="collapsed",
-                            placeholder="목표가")
+                            step=100, key=f"al_tgt_{code}",
+                            label_visibility="collapsed")
                     with _c2:
+                        st.caption("🛑 손절가")
                         _stp = st.number_input(
-                            "🛑손절", min_value=0,
+                            "손절가", min_value=0,
                             value=int(_al.get('stop') or (price * 0.93 if price else 0)),
-                            step=100, key=f"al_stp_{code}", label_visibility="collapsed",
-                            placeholder="손절가")
-                    st.caption("🎯목표가   🛑손절가")
+                            step=100, key=f"al_stp_{code}",
+                            label_visibility="collapsed")
                     _b1, _b2 = st.columns(2)
                     with _b1:
                         if st.button("저장", key=f"al_save_{code}", use_container_width=True):
@@ -164,13 +166,13 @@ def render_sidebar():
         if _ns_enabled:
             _c1, _c2 = st.columns(2)
             with _c1:
-                _ns_start = st.number_input("시작", min_value=0, max_value=23,
+                _ns_start = st.number_input("시작 (시)", min_value=0, max_value=23,
                                             value=_ns['start_hour'], step=1,
-                                            key="ns_start", format="%d시")
+                                            key="ns_start")
             with _c2:
-                _ns_end = st.number_input("종료", min_value=0, max_value=23,
+                _ns_end = st.number_input("종료 (시)", min_value=0, max_value=23,
                                           value=_ns['end_hour'], step=1,
-                                          key="ns_end", format="%d시")
+                                          key="ns_end")
             _ns_interval = st.select_slider(
                 "전송 간격", options=[0.5, 1, 2, 3, 6],
                 value=_ns['interval_hours'], key="ns_interval",
