@@ -5,6 +5,45 @@
 - get_valid_kakao_token: 유효 토큰 반환 (만료 전 자동 갱신)
 - send_kakao_message   : 나에게 보내기
 - format_kakao_message : 분석 결과 포맷팅
+
+=======================================================================
+[카카오 연결 문제 해결 기록] — 다시 건드리기 전에 반드시 읽을 것
+=======================================================================
+
+■ 문제 1: -401 "this access token does not exist"
+  원인: Secrets에 kakao_access_token을 직접 저장하는 방식.
+        카카오 Access Token 유효기간은 6시간이라 만료 후 항상 -401.
+  해결: Secrets에서 kakao_access_token 완전 제거.
+        OAuth로 받은 토큰(Access+Refresh)을 쿠키에 저장하고,
+        Refresh Token(유효기간 2개월)으로 자동 갱신.
+
+■ 문제 2: handle_kakao_callback()이 code를 자동 소비
+  원인: Streamlit Cloud에서 Kakao OAuth 리디렉션 시
+        st.query_params로 ?code= 값을 받아 자동 교환 시도.
+        BUT CookieController 초기화가 query_params를 클리어하여
+        st.query_params가 항상 비어서 교환 실패 → 에러 메시지 없이 사라짐.
+        그런데 내부적으로 code는 이미 Kakao에 전송되어 소비(KOE320).
+        결과적으로 자동도 안 되고 수동도 안 되는 교착 상태.
+  해결: handle_kakao_callback()에서 code 교환 로직 완전 제거.
+        사용자가 URL에서 code 값을 직접 복사 → 사이드바 입력란에 붙여넣기.
+        _apply_kakao_auth_code()만 사용 (중복 코드 체크 없이).
+
+■ 현재 연결 방법 (정상 작동 확인됨)
+  1. 사이드바 "🔑 카카오 로그인" 클릭
+  2. 새 탭 URL에서 ?code= 뒤 값 복사
+  3. 사이드바 입력란에 붙여넣고 "✅ 연결하기"
+  4. 토큰이 쿠키에 저장 → 앱 재시작 시 자동 복원
+  5. Access Token 만료 전 Refresh Token으로 자동 갱신
+
+■ Streamlit Cloud + CookieController 주의사항
+  - st.query_params는 CookieController 초기화 후 비워질 수 있음
+  - OAuth redirect 방식(리디렉션 자동 처리)은 이 환경에서 신뢰 불가
+  - 반드시 수동 code 입력 방식 유지할 것
+
+■ Secrets에 필요한 키 (카카오 관련)
+  - kakao_rest_key : REST API 키 (플랫폼 키 탭의 대표 키)
+  - kakao_access_token, kakao_refresh_token : 불필요, 넣지 말 것
+=======================================================================
 """
 import json
 import time
